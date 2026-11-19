@@ -1,8 +1,11 @@
-import express from 'express';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { GoogleGenAI, Type } from '@google/genai';
+import { initializeApp, getApps, getApp } from 'firebase-admin/app';
+import { getAuth as getAdminAuth, type DecodedIdToken } from 'firebase-admin/auth';
+import firebaseConfig from './firebase-applet-config.json' with { type: 'json' };
 
 dotenv.config();
 
@@ -11,8 +14,134 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const PRIMARY_ADMIN_EMAIL = 'anh03061987@gmail.com';
+
+// Initialize Firebase Admin Auth ONLY for cryptographic ID token verification (requires zero IAM)
+const adminApp = getApps().length
+  ? getApp()
+  : initializeApp({ projectId: firebaseConfig.projectId });
+const adminAuth = getAdminAuth(adminApp);
+
+interface AuthenticatedRequest extends Request {
+  authUser?: {
+    uid: string;
+    email: string;
+    emailVerified: boolean;
+    isPrimaryAdmin: boolean;
+    token: string;
+    decoded: DecodedIdToken;
+  };
+}
 
 app.use(express.json({ limit: '1mb' }));
+
+// Prevent caching of any API response
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+  res.setHeader('Pragma', 'no-cache');
+  next();
+});
+
+async function checkTeacherApprovedViaFirestoreRest(
+  uid: string,
+  idToken: string
+): Promise<{ approved: boolean; status: string }> {
+  const dbId = encodeURIComponent(firebaseConfig.firestoreDatabaseId || '(default)');
+  const safeUid = encodeURIComponent(uid);
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    firebaseConfig.projectId
+  )}/databases/${dbId}/documents/teacher_access_requests/${safeUid}`;
+
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      Accept: 'application/json',
+    },
+  });
+
+  if (resp.status === 404) {
+    return { approved: false, status: 'unregistered' };
+  }
+  if (!resp.ok) {
+    return { approved: false, status: 'denied' };
+  }
+
+  const data = (await resp.json()) as {
+    fields?: {
+      status?: { stringValue?: string };
+    };
+  };
+  const status = data.fields?.status?.stringValue || 'pending';
+  return { approved: status === 'approved', status };
+}
+
+async function requireApprovedTeacher(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const authHeader = req.headers.authorization || '';
+    if (!authHeader.startsWith('Bearer ')) {
+      res.status(401).json({
+        error: 'Yêu cầu đăng nhập tài khoản Giáo viên hợp lệ để sử dụng chức năng này.',
+        code: 'UNAUTHENTICATED',
+      });
+      return;
+    }
+
+    const idToken = authHeader.slice(7).trim();
+    if (!idToken) {
+      res.status(401).json({
+        error: 'Thiếu mã xác thực phiên đăng nhập.',
+        code: 'UNAUTHENTICATED',
+      });
+      return;
+    }
+
+    const decoded = await adminAuth.verifyIdToken(idToken);
+    const email = (decoded.email || '').trim().toLowerCase();
+    const emailVerified = decoded.email_verified === true;
+
+    if (!email || !emailVerified) {
+      res.status(403).json({
+        error: 'Tài khoản chưa xác minh email hoặc không có quyền truy cập API Giáo viên.',
+        code: 'EMAIL_NOT_VERIFIED',
+      });
+      return;
+    }
+
+    const isPrimaryAdmin = email === PRIMARY_ADMIN_EMAIL;
+    if (!isPrimaryAdmin) {
+      const approval = await checkTeacherApprovedViaFirestoreRest(decoded.uid, idToken);
+      if (!approval.approved) {
+        res.status(403).json({
+          error: 'Tài khoản của bạn đang chờ quản trị viên phê duyệt quyền Giáo viên.',
+          code: 'TEACHER_PENDING_APPROVAL',
+          status: approval.status,
+        });
+        return;
+      }
+    }
+
+    req.authUser = {
+      uid: decoded.uid,
+      email,
+      emailVerified,
+      isPrimaryAdmin,
+      token: idToken,
+      decoded,
+    };
+    next();
+  } catch (error) {
+    console.error('Auth verification failed:', error instanceof Error ? error.message : 'Invalid token');
+    res.status(401).json({
+      error: 'Phiên đăng nhập không hợp lệ hoặc đã hết hạn. Vui lòng đăng nhập lại.',
+      code: 'INVALID_TOKEN',
+    });
+  }
+}
 
 function getGeminiClient() {
   const apiKey = process.env.GEMINI_API_KEY;
@@ -30,9 +159,22 @@ function getGeminiClient() {
 }
 
 // ============================================================================
-// SERVER-SIDE GEMINI API ROUTES (GVCN 360 AI PRO)
+// AUTH VERIFICATION ENDPOINT (Protected)
 // ============================================================================
-app.post('/api/gemini/analyze', async (req, res) => {
+app.get('/api/auth/verify', requireApprovedTeacher, (req: AuthenticatedRequest, res) => {
+  res.json({
+    authenticated: true,
+    approved: true,
+    uid: req.authUser?.uid,
+    email: req.authUser?.email,
+    isPrimaryAdmin: req.authUser?.isPrimaryAdmin === true,
+  });
+});
+
+// ============================================================================
+// SERVER-SIDE GEMINI API ROUTES (GVCN 360 AI PRO — Strictly Protected)
+// ============================================================================
+app.post('/api/gemini/analyze', requireApprovedTeacher, async (req: AuthenticatedRequest, res) => {
   try {
     const ai = getGeminiClient();
     if (!ai) {
@@ -65,7 +207,7 @@ app.post('/api/gemini/analyze', async (req, res) => {
   }
 });
 
-app.post('/api/gemini/subject-analyze', async (req, res) => {
+app.post('/api/gemini/subject-analyze', requireApprovedTeacher, async (req: AuthenticatedRequest, res) => {
   try {
     const ai = getGeminiClient();
     if (!ai) {
@@ -98,7 +240,7 @@ app.post('/api/gemini/subject-analyze', async (req, res) => {
   }
 });
 
-app.post('/api/gemini/parent-comm', async (req, res) => {
+app.post('/api/gemini/parent-comm', requireApprovedTeacher, async (req: AuthenticatedRequest, res) => {
   try {
     const ai = getGeminiClient();
     if (!ai) {

@@ -26,6 +26,8 @@ import type {
   RoleDefinition,
   StudentPiiRecord,
   StudentRecord,
+  TeacherAccessRequest,
+  TeacherAccessStatus,
   WeeklyTeamStat,
 } from '../../types/gvcn';
 import {
@@ -735,9 +737,25 @@ export function AttendanceTab({
 interface RolesTabProps {
   activeRoleId: string;
   onSelectRole: (roleId: string) => void;
+  isPrimaryAdmin?: boolean;
+  teacherRequests?: TeacherAccessRequest[];
+  onUpdateTeacherRequestStatus?: (
+    req: TeacherAccessRequest,
+    nextStatus: TeacherAccessStatus
+  ) => Promise<void>;
+  processingTeacherUid?: string | null;
 }
 
-export function RolesTab({ activeRoleId, onSelectRole }: RolesTabProps) {
+export function RolesTab({
+  activeRoleId,
+  onSelectRole,
+  isPrimaryAdmin = false,
+  teacherRequests = [],
+  onUpdateTeacherRequestStatus,
+  processingTeacherUid = null,
+}: RolesTabProps) {
+  const pendingTeacherCount = teacherRequests.filter((r) => r.status === 'pending').length;
+
   return (
     <div className="space-y-6">
       <div>
@@ -746,6 +764,123 @@ export function RolesTab({ activeRoleId, onSelectRole }: RolesTabProps) {
           Hệ thống tách bạch rõ quyền lập phiếu đề xuất của Ban cán sự lớp và quyền phê duyệt duy nhất của GVCN.
         </p>
       </div>
+
+      {isPrimaryAdmin && (
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+          <div className="px-5 py-4 bg-gradient-to-r from-[#102744] to-[#0C9BA6] text-white flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-sm sm:text-base flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-teal-200" />
+                <span>Phê duyệt Tài khoản Giáo viên mới (Quản trị hệ thống)</span>
+              </h3>
+              <p className="text-xs text-teal-100 mt-0.5">
+                Tài khoản Google mới đăng nhập sẽ ở trạng thái &ldquo;Chờ cấp quyền&rdquo; cho đến khi bạn phê duyệt. Giáo viên được duyệt chỉ thấy dữ liệu lớp riêng của họ.
+              </p>
+            </div>
+            <span className="px-3 py-1 rounded-lg bg-white/15 text-xs font-bold">
+              {pendingTeacherCount} yêu cầu chờ duyệt
+            </span>
+          </div>
+
+          <div className="p-5">
+            {teacherRequests.length === 0 ? (
+              <div className="text-sm text-slate-500 text-center py-6 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                Chưa có giáo viên nào khác gửi yêu cầu cấp quyền.
+              </div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs sm:text-sm">
+                  <thead>
+                    <tr className="border-b border-slate-200 text-slate-500 text-xs uppercase">
+                      <th className="py-2.5 pr-4">Giáo viên / Gmail</th>
+                      <th className="py-2.5 pr-4">Trường & Lớp dự kiến</th>
+                      <th className="py-2.5 pr-4">Trạng thái</th>
+                      <th className="py-2.5 text-right">Thao tác</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {teacherRequests.map((req) => {
+                      const isBusy = processingTeacherUid === req.uid;
+                      return (
+                        <tr key={req.uid} className="hover:bg-slate-50/70">
+                          <td className="py-3 pr-4">
+                            <div className="font-bold text-[#102744]">{req.displayName}</div>
+                            <div className="text-xs text-slate-500">{req.email}</div>
+                            {req.note && (
+                              <div className="text-xs text-slate-500 italic mt-0.5">Ghi chú: {req.note}</div>
+                            )}
+                          </td>
+                          <td className="py-3 pr-4">
+                            <div className="font-medium text-slate-800">
+                              {req.requestedSchool || 'Chưa ghi'} • Lớp {req.requestedClass || '—'}
+                            </div>
+                            <div className="text-xs text-slate-500">
+                              Môn {req.requestedSubject || '—'} ({req.requestedYear || '2026–2027'})
+                            </div>
+                          </td>
+                          <td className="py-3 pr-4">
+                            <span
+                              className={`inline-flex px-2.5 py-1 rounded-lg text-xs font-bold ${
+                                req.status === 'approved'
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : req.status === 'pending'
+                                  ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                  : 'bg-rose-50 text-rose-700 border border-rose-200'
+                              }`}
+                            >
+                              {req.status === 'approved'
+                                ? 'Đã phê duyệt'
+                                : req.status === 'pending'
+                                ? 'Chờ cấp quyền'
+                                : req.status === 'rejected'
+                                ? 'Đã từ chối'
+                                : 'Đã thu hồi'}
+                            </span>
+                          </td>
+                          <td className="py-3 text-right">
+                            <div className="inline-flex flex-wrap justify-end gap-1.5">
+                              {req.status !== 'approved' && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => onUpdateTeacherRequestStatus?.(req, 'approved')}
+                                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-bold"
+                                >
+                                  Phê duyệt
+                                </button>
+                              )}
+                              {req.status === 'pending' && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => onUpdateTeacherRequestStatus?.(req, 'rejected')}
+                                  className="px-3 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 disabled:opacity-50 text-rose-700 border border-rose-200 text-xs font-bold"
+                                >
+                                  Từ chối
+                                </button>
+                              )}
+                              {req.status === 'approved' && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => onUpdateTeacherRequestStatus?.(req, 'revoked')}
+                                  className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-rose-100 hover:text-rose-700 disabled:opacity-50 text-slate-700 text-xs font-bold"
+                                >
+                                  Thu hồi quyền
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {ROLES.map((role) => {

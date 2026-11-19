@@ -50,6 +50,8 @@ import {
   handleFirestoreError,
   OperationType,
   signOutUser,
+  PRIMARY_ADMIN_EMAIL,
+  getAuthBearerHeaders,
 } from './firebase';
 import {
   DEFAULT_EMULATION_STANDARDS,
@@ -75,6 +77,8 @@ import type {
   StudentPiiRecord,
   StudentRecord,
   SubjectScoreRecord,
+  TeacherAccessRequest,
+  TeacherAccessStatus,
   TicketRecord,
   TicketType,
   VneduImportLog,
@@ -82,7 +86,7 @@ import type {
   WeeklySnapshot,
   YouthActivityRecord,
 } from './types/gvcn';
-import { AuthGate } from './components/AuthGate';
+import { AuthGate, PendingTeacherGate, NewTeacherSetupGate } from './components/AuthGate';
 import {
   AdjustRankModal,
   BatchConfirmModal,
@@ -154,12 +158,38 @@ import {
   type VneduVerifiedLinkStore,
 } from './utils/vneduScoreImport';
 
+const EMPTY_CLASS_CONFIG: ClassConfig = {
+  teacherName: '',
+  subject: '',
+  schoolName: '',
+  className: '',
+  schoolYear: '2026–2027',
+  fundBalance: 0,
+  updatedAt: null,
+};
+
 export default function App() {
-  // 1. Trạng thái xác thực Firebase
+  // 1. Trạng thái xác thực Firebase & Kiểm soát quyền Giáo viên
   const [user, setUser] = useState<User | null>(null);
   const [userRootReady, setUserRootReady] = useState(false);
   const [authLoading, setAuthLoading] = useState(true);
   const [authError, setAuthError] = useState('');
+  const [teacherAccessState, setTeacherAccessState] = useState<
+    'checking' | 'approved' | 'unregistered' | 'pending' | 'rejected' | 'revoked'
+  >('checking');
+  const [teacherAccessRequest, setTeacherAccessRequest] = useState<TeacherAccessRequest | null>(null);
+  const [isSubmittingAccessRequest, setIsSubmittingAccessRequest] = useState(false);
+  const [classConfigLoaded, setClassConfigLoaded] = useState(false);
+  const [needsFirstWorkspaceSetup, setNeedsFirstWorkspaceSetup] = useState(false);
+  const [isCreatingFirstWorkspace, setIsCreatingFirstWorkspace] = useState(false);
+  const [adminTeacherRequests, setAdminTeacherRequests] = useState<TeacherAccessRequest[]>([]);
+  const [processingTeacherUid, setProcessingTeacherUid] = useState<string | null>(null);
+  const previousAuthUidRef = useRef<string | null>(null);
+
+  const isPrimaryAdmin = useMemo(
+    () => Boolean(user?.email && user.email.toLowerCase() === PRIMARY_ADMIN_EMAIL && user.emailVerified),
+    [user?.email, user?.emailVerified]
+  );
 
   // 2. Điều hướng & thông báo
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -167,18 +197,10 @@ export default function App() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [activeRoleId, setActiveRoleId] = useState('gvcn');
 
-  // 3. Cấu hình lớp học & danh sách workspace đã lưu
-  const [classConfig, setClassConfig] = useState<ClassConfig>({
-    teacherName: 'Ngọc Ánh',
-    subject: 'Toán',
-    schoolName: 'THPT Hòa Đa',
-    className: '12D6',
-    schoolYear: '2026–2027',
-    fundBalance: 0,
-    updatedAt: null,
-  });
+  // 3. Cấu hình lớp học & danh sách workspace đã lưu (khởi tạo trung tính, không gán cứng 12D6)
+  const [classConfig, setClassConfig] = useState<ClassConfig>(EMPTY_CLASS_CONFIG);
   const [savedWorkspaces, setSavedWorkspaces] = useState<SavedWorkspace[]>([]);
-  const [configForm, setConfigForm] = useState<ClassConfig>(classConfig);
+  const [configForm, setConfigForm] = useState<ClassConfig>(EMPTY_CLASS_CONFIG);
 
   // 4. Dữ liệu thời gian thực từ Cloud Firestore
   const [students, setStudents] = useState<StudentRecord[]>([]);
@@ -453,72 +475,111 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   };
 
+  // Xóa sạch toàn bộ dữ liệu nhạy cảm khỏi bộ nhớ ứng dụng khi đăng xuất hoặc đổi tài khoản
+  const resetSensitiveSessionState = () => {
+    setClassConfig(EMPTY_CLASS_CONFIG);
+    setConfigForm(EMPTY_CLASS_CONFIG);
+    setClassConfigLoaded(false);
+    setNeedsFirstWorkspaceSetup(false);
+    setSavedWorkspaces([]);
+    setStudents([]);
+    setStudentPiiMap({});
+    setTickets([]);
+    setAuditLogs([]);
+    setAttendanceRecords([]);
+    setPlans([]);
+    setYouthActivities([]);
+    setSubjectScores({});
+    setVneduImportHistory([]);
+    setGrade12Profiles({});
+    setWeeklySnapshots([]);
+    setEmulationDraftsByWeek({});
+    setEmulationAdjustLogs([]);
+    setKnowledgeTopics([]);
+    setQuickChecks([]);
+    setErrorLogs([]);
+    setLuckyWheelAllowedRoles(['gvcn']);
+    setVneduWorkbook(null);
+    setVneduFileName('');
+    setVneduSheetNames([]);
+    setVneduSelectedSheet('');
+    setVneduRawText('');
+    setVneduMatrix([]);
+    setVneduMerges([]);
+    setVneduHeaderRowIndex(-1);
+    setVneduColumns([]);
+    setVneduRoleMap({});
+    setVneduRowResolutions({});
+    setVneduConfirmedIdLinks({});
+    setAiAnalysisResult('');
+    setGeneratedMessage('');
+    setGeneratedReportCardDraft('');
+    setActiveRoleId('gvcn');
+    setActiveTab('dashboard');
+    setAdminTeacherRequests([]);
+    seededTopicsRef.current = {};
+  };
+
   // Kiểm tra kết nối Firestore & lắng nghe đăng nhập Google
   useEffect(() => {
     testConnection();
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
       if (!currentUser) {
+        previousAuthUidRef.current = null;
+        resetSensitiveSessionState();
         setUser(null);
         setUserRootReady(false);
+        setTeacherAccessState('checking');
+        setTeacherAccessRequest(null);
         setAuthLoading(false);
-        setSavedWorkspaces([]);
-        setStudents([]);
-        setStudentPiiMap({});
-        setTickets([]);
-        setAuditLogs([]);
-        setAttendanceRecords([]);
-        setPlans([]);
-        setYouthActivities([]);
-        setSubjectScores({});
-        setVneduImportHistory([]);
-        setGrade12Profiles({});
-        setWeeklySnapshots([]);
-        setEmulationDraftsByWeek({});
-        setEmulationAdjustLogs([]);
-        setKnowledgeTopics([]);
-        setQuickChecks([]);
-        setErrorLogs([]);
-        setLuckyWheelAllowedRoles(['gvcn']);
-        setVneduWorkbook(null);
-        setVneduFileName('');
-        setVneduSheetNames([]);
-        setVneduSelectedSheet('');
-        setVneduRawText('');
-        setVneduMatrix([]);
-        setVneduMerges([]);
-        setVneduHeaderRowIndex(-1);
-        setVneduColumns([]);
-        setVneduRoleMap({});
-        setVneduRowResolutions({});
         return;
       }
 
+      // Nếu đổi sang tài khoản Google khác trên cùng trình duyệt -> xóa sạch state phiên cũ ngay lập tức
+      if (previousAuthUidRef.current && previousAuthUidRef.current !== currentUser.uid) {
+        resetSensitiveSessionState();
+      }
+      previousAuthUidRef.current = currentUser.uid;
+
       if (!currentUser.emailVerified) {
+        resetSensitiveSessionState();
         setAuthError('Tài khoản Google chưa xác minh email. Vui lòng sử dụng tài khoản đã xác minh.');
         setUser(null);
         setUserRootReady(false);
+        setTeacherAccessState('checking');
+        setTeacherAccessRequest(null);
         setAuthLoading(false);
         return;
       }
 
       setAuthError('');
       setUser(currentUser);
-      try {
-        const userRef = doc(db, 'users', currentUser.uid);
-        const snap = await getDoc(userRef);
-        if (!snap.exists()) {
-          await setDoc(userRef, {
-            uid: currentUser.uid,
-            email: currentUser.email || '',
-            displayName: currentUser.displayName || 'Giáo viên chủ nhiệm',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+
+      const isOwnerAdmin = (currentUser.email || '').toLowerCase() === PRIMARY_ADMIN_EMAIL;
+      if (isOwnerAdmin) {
+        try {
+          const userRef = doc(db, 'users', currentUser.uid);
+          const snap = await getDoc(userRef);
+          if (!snap.exists()) {
+            await setDoc(userRef, {
+              uid: currentUser.uid,
+              email: currentUser.email || '',
+              displayName: currentUser.displayName || 'Giáo viên chủ nhiệm',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          setTeacherAccessState('approved');
+          setUserRootReady(true);
+        } catch (err) {
+          handleFirestoreError(err, OperationType.WRITE, `users/${currentUser.uid}`);
+        } finally {
+          setAuthLoading(false);
         }
-        setUserRootReady(true);
-      } catch (err) {
-        handleFirestoreError(err, OperationType.WRITE, `users/${currentUser.uid}`);
-      } finally {
+      } else {
+        // Tài khoản Gmail khác: kiểm tra trạng thái phê duyệt thực tế trên Firestore trước khi cấp quyền
+        setTeacherAccessState('checking');
+        setUserRootReady(false);
         setAuthLoading(false);
       }
     });
@@ -526,16 +587,221 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Định danh lớp học an toàn cho Firestore doc ID
+  // Lắng nghe trạng thái phê duyệt quyền Giáo viên cho các tài khoản Google khác chủ ứng dụng
+  useEffect(() => {
+    if (!user || isPrimaryAdmin) return;
+
+    const reqRef = doc(db, 'teacher_access_requests', user.uid);
+    const unsubAccess = onSnapshot(
+      reqRef,
+      async (snap) => {
+        if (!snap.exists()) {
+          resetSensitiveSessionState();
+          setTeacherAccessRequest(null);
+          setTeacherAccessState('unregistered');
+          setUserRootReady(false);
+          return;
+        }
+
+        const data = snap.data() as TeacherAccessRequest;
+        setTeacherAccessRequest(data);
+
+        if (data.status === 'approved') {
+          try {
+            const userRef = doc(db, 'users', user.uid);
+            const rootSnap = await getDoc(userRef);
+            if (!rootSnap.exists()) {
+              await setDoc(userRef, {
+                uid: user.uid,
+                email: user.email || '',
+                displayName: data.displayName || user.displayName || 'Giáo viên chủ nhiệm',
+                createdAt: serverTimestamp(),
+                updatedAt: serverTimestamp(),
+              });
+            }
+            setTeacherAccessState('approved');
+            setUserRootReady(true);
+          } catch (err) {
+            handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}`);
+          }
+        } else {
+          resetSensitiveSessionState();
+          setTeacherAccessState(data.status || 'pending');
+          setUserRootReady(false);
+        }
+      },
+      (err) => handleFirestoreError(err, OperationType.GET, `teacher_access_requests/${user.uid}`)
+    );
+
+    return () => unsubAccess();
+  }, [user, isPrimaryAdmin]);
+
+  // Chủ ứng dụng lắng nghe danh sách yêu cầu cấp quyền Giáo viên mới
+  useEffect(() => {
+    if (!user || !isPrimaryAdmin) {
+      setAdminTeacherRequests([]);
+      return;
+    }
+
+    const colRef = collection(db, 'teacher_access_requests');
+    const unsubReqs = onSnapshot(
+      colRef,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => ({
+          ...(d.data() as TeacherAccessRequest),
+          uid: d.data().uid || d.id,
+        }));
+        const rank: Record<TeacherAccessStatus, number> = {
+          pending: 0,
+          approved: 1,
+          rejected: 2,
+          revoked: 3,
+        };
+        list.sort((a, b) => (rank[a.status] ?? 9) - (rank[b.status] ?? 9));
+        setAdminTeacherRequests(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, 'teacher_access_requests')
+    );
+
+    return () => unsubReqs();
+  }, [user, isPrimaryAdmin]);
+
+  const handleSubmitTeacherAccessRequest = async (payload: {
+    displayName: string;
+    requestedSchool: string;
+    requestedClass: string;
+    requestedSubject: string;
+    requestedYear: string;
+    note: string;
+  }) => {
+    if (!user) return;
+    setIsSubmittingAccessRequest(true);
+    try {
+      const reqRef = doc(db, 'teacher_access_requests', user.uid);
+      await setDoc(reqRef, {
+        uid: user.uid,
+        email: user.email || '',
+        displayName: payload.displayName.slice(0, 150),
+        requestedSchool: payload.requestedSchool.slice(0, 200),
+        requestedClass: payload.requestedClass.slice(0, 50),
+        requestedSubject: payload.requestedSubject.slice(0, 100),
+        requestedYear: payload.requestedYear.slice(0, 50),
+        note: payload.note.slice(0, 500),
+        status: 'pending',
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, `teacher_access_requests/${user.uid}`);
+    } finally {
+      setIsSubmittingAccessRequest(false);
+    }
+  };
+
+  const handleRefreshTeacherAccessStatus = async () => {
+    if (!user || isPrimaryAdmin) return;
+    try {
+      const reqRef = doc(db, 'teacher_access_requests', user.uid);
+      const snap = await getDoc(reqRef);
+      if (!snap.exists()) {
+        setTeacherAccessRequest(null);
+        setTeacherAccessState('unregistered');
+        setUserRootReady(false);
+        return;
+      }
+      const data = snap.data() as TeacherAccessRequest;
+      setTeacherAccessRequest(data);
+      if (data.status === 'approved') {
+        setTeacherAccessState('approved');
+        setUserRootReady(true);
+      } else {
+        setTeacherAccessState(data.status || 'pending');
+        setUserRootReady(false);
+      }
+    } catch (err) {
+      handleFirestoreError(err, OperationType.GET, `teacher_access_requests/${user.uid}`);
+    }
+  };
+
+  const handleUpdateTeacherRequestStatus = async (
+    req: TeacherAccessRequest,
+    nextStatus: TeacherAccessStatus
+  ) => {
+    if (!user || !isPrimaryAdmin) return;
+    setProcessingTeacherUid(req.uid);
+    try {
+      const reqRef = doc(db, 'teacher_access_requests', req.uid);
+      await updateDoc(reqRef, {
+        status: nextStatus,
+        approvedBy: user.email || user.uid,
+        reviewNote:
+          nextStatus === 'approved'
+            ? 'Đã được chủ ứng dụng phê duyệt quyền Giáo viên.'
+            : nextStatus === 'rejected'
+            ? 'Yêu cầu chưa được phê duyệt.'
+            : 'Quyền truy cập đã được tạm thu hồi bởi quản trị viên.',
+        updatedAt: serverTimestamp(),
+      });
+      showToast(
+        nextStatus === 'approved'
+          ? `Đã phê duyệt tài khoản giáo viên ${req.displayName} (${req.email}).`
+          : nextStatus === 'rejected'
+          ? `Đã từ chối yêu cầu của ${req.email}.`
+          : `Đã thu hồi quyền truy cập của ${req.email}.`
+      );
+    } catch (err) {
+      handleFirestoreError(err, OperationType.UPDATE, `teacher_access_requests/${req.uid}`);
+    } finally {
+      setProcessingTeacherUid(null);
+    }
+  };
+
+  const handleCreateFirstTeacherWorkspace = async (payload: {
+    teacherName: string;
+    schoolName: string;
+    className: string;
+    subject: string;
+    schoolYear: string;
+  }) => {
+    if (!user || teacherAccessState !== 'approved') return;
+    setIsCreatingFirstWorkspace(true);
+    try {
+      const configDocRef = doc(db, 'users', user.uid, 'class_configs', 'active_workspace');
+      await setDoc(configDocRef, {
+        ownerUid: user.uid,
+        teacherName: payload.teacherName.slice(0, 120),
+        subject: payload.subject.slice(0, 100),
+        schoolName: payload.schoolName.slice(0, 200),
+        className: payload.className.slice(0, 50),
+        schoolYear: payload.schoolYear.slice(0, 50),
+        fundBalance: 0,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      await upsertSavedWorkspace(payload);
+      setNeedsFirstWorkspaceSetup(false);
+      setClassConfigLoaded(true);
+      showToast(`Đã khởi tạo không gian lớp ${payload.className} (${payload.schoolName})!`);
+    } catch (err) {
+      handleFirestoreError(err, OperationType.CREATE, `users/${user.uid}/class_configs/active_workspace`);
+    } finally {
+      setIsCreatingFirstWorkspace(false);
+    }
+  };
+
+  // Định danh lớp học an toàn cho Firestore doc ID (chỉ hợp lệ khi đã có thông tin lớp thật)
   const classWorkspaceId = useMemo(() => {
-    const safeSchool = normalizeSlug(classConfig.schoolName, 'thpt_hoa_da');
-    const safeClass = normalizeSlug(classConfig.className, '12d6');
-    const safeYear = normalizeSlug(classConfig.schoolYear, '2026_2027');
+    if (!classConfig.schoolName.trim() || !classConfig.className.trim() || !classConfig.schoolYear.trim()) {
+      return '';
+    }
+    const safeSchool = normalizeSlug(classConfig.schoolName, 'school');
+    const safeClass = normalizeSlug(classConfig.className, 'class');
+    const safeYear = normalizeSlug(classConfig.schoolYear, 'year');
     return `${safeSchool}_${safeClass}_${safeYear}`.slice(0, 120);
   }, [classConfig.schoolName, classConfig.className, classConfig.schoolYear]);
 
   const activeSubjectSlug = useMemo(
-    () => normalizeSlug(classConfig.subject, 'toan'),
+    () => normalizeSlug(classConfig.subject, 'mon_hoc'),
     [classConfig.subject]
   );
 
@@ -546,7 +812,7 @@ export default function App() {
 
   // Nạp quyền sử dụng Vòng quay may mắn theo đúng tài khoản và lớp học hiện tại
   useEffect(() => {
-    if (!user?.uid) {
+    if (!user?.uid || !classWorkspaceId) {
       setLuckyWheelAllowedRoles(['gvcn']);
       return;
     }
@@ -584,7 +850,7 @@ export default function App() {
     setVneduDeselectedRows({});
     setVneduCodeSystemVerifiedSameAsMoet(false);
     setVneduAutoConfirmExactNameAndDob(true);
-    if (!user?.uid) {
+    if (!user?.uid || !classWorkspaceId) {
       setVneduConfirmedIdLinks({});
       return;
     }
@@ -626,7 +892,7 @@ export default function App() {
   }, [user?.uid, classWorkspaceId]);
 
   const handleToggleLuckyWheelRolePermission = (roleId: string) => {
-    if (activeRoleId !== 'gvcn' || roleId === 'gvcn' || !user?.uid) return;
+    if (activeRoleId !== 'gvcn' || roleId === 'gvcn' || !user?.uid || !classWorkspaceId) return;
     setLuckyWheelAllowedRoles((prev) => {
       const exists = prev.includes(roleId);
       const next = exists ? prev.filter((id) => id !== roleId) : [...prev, roleId];
@@ -646,14 +912,11 @@ export default function App() {
     });
   };
 
-  // Đồng bộ toàn bộ dữ liệu theo user & workspace từ Cloud Firestore
+  // Bước 1: Đồng bộ cấu hình lớp đang mở & danh sách lớp đã lưu của giáo viên đã được phê duyệt
   useEffect(() => {
-    if (!user || !userRootReady) return;
+    if (!user || !userRootReady || teacherAccessState !== 'approved') return;
 
     const userRoot = `users/${user.uid}`;
-    const wsPath = `${userRoot}/workspaces/${classWorkspaceId}`;
-
-    // 1. Cấu hình lớp học đang mở
     const configDocRef = doc(db, 'users', user.uid, 'class_configs', 'active_workspace');
     const unsubConfig = onSnapshot(
       configDocRef,
@@ -662,7 +925,10 @@ export default function App() {
           const data = snap.data() as Partial<ClassConfig>;
           setClassConfig((prev) => ({ ...prev, ...data }));
           setConfigForm((prev) => ({ ...prev, ...data }));
-        } else {
+          setNeedsFirstWorkspaceSetup(false);
+          setClassConfigLoaded(true);
+        } else if (isPrimaryAdmin) {
+          // Chỉ chủ ứng dụng (GVCN Ngọc Ánh) mới có cấu hình khởi tạo lớp 12D6 THPT Hòa Đa
           setDoc(configDocRef, {
             ownerUid: user.uid,
             teacherName: 'Ngọc Ánh',
@@ -676,12 +942,17 @@ export default function App() {
           }).catch((e) =>
             handleFirestoreError(e, OperationType.CREATE, `${userRoot}/class_configs/active_workspace`)
           );
+        } else {
+          // Giáo viên mới đã được duyệt: không gán mặc định 12D6 / Ngọc Ánh, yêu cầu tự khởi tạo lớp riêng
+          setClassConfig(EMPTY_CLASS_CONFIG);
+          setConfigForm(EMPTY_CLASS_CONFIG);
+          setNeedsFirstWorkspaceSetup(true);
+          setClassConfigLoaded(false);
         }
       },
       (err) => handleFirestoreError(err, OperationType.GET, `${userRoot}/class_configs/active_workspace`)
     );
 
-    // 2. Danh sách workspace đã lưu
     const workspacesColRef = collection(db, 'users', user.uid, 'saved_workspaces');
     const unsubWorkspaces = onSnapshot(
       workspacesColRef,
@@ -692,6 +963,28 @@ export default function App() {
       },
       (err) => handleFirestoreError(err, OperationType.LIST, `${userRoot}/saved_workspaces`)
     );
+
+    return () => {
+      unsubConfig();
+      unsubWorkspaces();
+    };
+  }, [user, userRootReady, teacherAccessState, isPrimaryAdmin]);
+
+  // Bước 2: Đồng bộ toàn bộ dữ liệu nghiệp vụ của lớp đang chọn từ Cloud Firestore
+  useEffect(() => {
+    if (
+      !user ||
+      !userRootReady ||
+      teacherAccessState !== 'approved' ||
+      !classConfigLoaded ||
+      needsFirstWorkspaceSetup ||
+      !classWorkspaceId
+    ) {
+      return;
+    }
+
+    const userRoot = `users/${user.uid}`;
+    const wsPath = `${userRoot}/workspaces/${classWorkspaceId}`;
 
     // 3. Học sinh & SĐT phụ huynh bảo mật
     const studentsColRef = collection(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'students');
@@ -881,6 +1174,7 @@ export default function App() {
         if (
           matched.length === 0 &&
           !seededTopicsRef.current[activeSubjectWorkspaceKey] &&
+          isPrimaryAdmin &&
           (classConfig.subject || '').toLowerCase().includes('toán')
         ) {
           seededTopicsRef.current[activeSubjectWorkspaceKey] = true;
@@ -967,8 +1261,6 @@ export default function App() {
     );
 
     return () => {
-      unsubConfig();
-      unsubWorkspaces();
       unsubStudents();
       unsubTickets();
       unsubLogs();
@@ -986,11 +1278,30 @@ export default function App() {
       unsubQuickChecks();
       unsubErrorLogs();
     };
-  }, [user, userRootReady, classWorkspaceId, activeSubjectWorkspaceKey, activeSubjectSlug, classConfig.subject, classConfig.teacherName]);
+  }, [
+    user,
+    userRootReady,
+    teacherAccessState,
+    classConfigLoaded,
+    needsFirstWorkspaceSetup,
+    classWorkspaceId,
+    activeSubjectWorkspaceKey,
+    activeSubjectSlug,
+    classConfig.subject,
+    classConfig.teacherName,
+    isPrimaryAdmin,
+  ]);
 
-  // Chỉ tải thông tin phụ huynh (student_pii) khi đang ở vai trò GVCN; tự động xóa khỏi bộ nhớ khi chuyển sang vai trò khác
+  // Chỉ tải thông tin phụ huynh (student_pii) khi đang ở vai trò GVCN đã được phê duyệt; tự động xóa khỏi bộ nhớ khi chuyển sang vai trò khác
   useEffect(() => {
-    if (!user || !userRootReady || activeRoleId !== 'gvcn') {
+    if (
+      !user ||
+      !userRootReady ||
+      teacherAccessState !== 'approved' ||
+      !classConfigLoaded ||
+      !classWorkspaceId ||
+      activeRoleId !== 'gvcn'
+    ) {
       setStudentPiiMap({});
       return;
     }
@@ -1018,7 +1329,7 @@ export default function App() {
     return () => {
       unsubPii();
     };
-  }, [user, userRootReady, classWorkspaceId, activeRoleId]);
+  }, [user, userRootReady, teacherAccessState, classConfigLoaded, classWorkspaceId, activeRoleId]);
 
   const currentRole = useMemo(
     () => ROLES.find((r) => r.id === activeRoleId) || ROLES[0],
@@ -3345,9 +3656,10 @@ Hãy viết báo cáo phân tích ngắn gọn, nhân văn bằng tiếng Việt
 2. Nhóm học sinh cần quan tâm hỗ trợ học tập bộ môn hoặc ôn thi tốt nghiệp THPT (chỉ nêu đúng theo số liệu trên).
 3. Gợi ý 3 hoạt động sinh hoạt chủ nhiệm / phụ đạo thiết thực cho tuần tới.`;
 
+      const headers = await getAuthBearerHeaders();
       const res = await fetch('/api/gemini/analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ prompt }),
       });
       const data = await res.json();
@@ -3390,9 +3702,10 @@ Giọng văn: ${toneMap[commTone] || commTone}.
 Thi đua tuần: ${lockedWeeks.join(', ') || 'Chưa chốt tuần'}.
 Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
 
+      const headers = await getAuthBearerHeaders();
       const res = await fetch('/api/gemini/parent-comm', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ prompt }),
       });
       const data = await res.json();
@@ -3781,9 +4094,62 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
     );
   }
 
-  // Màn hình đăng nhập Google khi chưa đăng nhập
+  // Trang chào công khai & cổng đăng nhập 2 lựa chọn khi chưa đăng nhập
   if (!user) {
     return <AuthGate authError={authError} />;
+  }
+
+  // Kiểm tra quyền giáo viên thực tế từ Firestore
+  if (teacherAccessState === 'checking') {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
+        <div className="w-12 h-12 border-4 border-[#0C9BA6] border-t-transparent rounded-full animate-spin mb-4" />
+        <h2 className="text-lg font-bold text-[#102744]">Đang xác minh quyền truy cập Giáo viên...</h2>
+        <p className="text-sm text-slate-500 mt-1">Kiểm tra hồ sơ phê duyệt theo tài khoản Google của bạn</p>
+      </div>
+    );
+  }
+
+  // Chặn hoàn toàn Gmail chưa được phê duyệt (hiển thị màn hình Chờ cấp quyền)
+  if (teacherAccessState !== 'approved') {
+    return (
+      <PendingTeacherGate
+        userEmail={user.email || ''}
+        userDisplayName={user.displayName || ''}
+        accessState={teacherAccessState}
+        existingRequest={teacherAccessRequest}
+        onSubmitRequest={handleSubmitTeacherAccessRequest}
+        onRefreshStatus={handleRefreshTeacherAccessStatus}
+        isSubmitting={isSubmittingAccessRequest}
+      />
+    );
+  }
+
+  // Giáo viên mới đã được duyệt nhưng chưa khởi tạo lớp đầu tiên
+  if (needsFirstWorkspaceSetup) {
+    return (
+      <NewTeacherSetupGate
+        userEmail={user.email || ''}
+        defaultTeacherName={teacherAccessRequest?.displayName || user.displayName || ''}
+        defaultSchool={teacherAccessRequest?.requestedSchool || ''}
+        defaultClass={teacherAccessRequest?.requestedClass || ''}
+        defaultSubject={teacherAccessRequest?.requestedSubject || ''}
+        defaultYear={teacherAccessRequest?.requestedYear || '2026–2027'}
+        onCreateFirstWorkspace={handleCreateFirstTeacherWorkspace}
+        isSaving={isCreatingFirstWorkspace}
+      />
+    );
+  }
+
+  // Chờ tải cấu hình lớp học chính thức của giáo viên trước khi mở Dashboard
+  if (!classConfigLoaded || !classWorkspaceId) {
+    return (
+      <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
+        <div className="w-12 h-12 border-4 border-[#0C9BA6] border-t-transparent rounded-full animate-spin mb-4" />
+        <h2 className="text-lg font-bold text-[#102744]">Đang tải không gian lớp học của bạn...</h2>
+        <p className="text-sm text-slate-500 mt-1">GVCN 360 AI PRO – Trợ lý chủ nhiệm thông minh</p>
+      </div>
+    );
   }
 
   const navItems: {
@@ -4520,7 +4886,16 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
             />
           )}
 
-          {activeTab === 'roles' && <RolesTab activeRoleId={activeRoleId} onSelectRole={handleSelectRole} />}
+          {activeTab === 'roles' && (
+            <RolesTab
+              activeRoleId={activeRoleId}
+              onSelectRole={handleSelectRole}
+              isPrimaryAdmin={isPrimaryAdmin}
+              teacherRequests={adminTeacherRequests}
+              onUpdateTeacherRequestStatus={handleUpdateTeacherRequestStatus}
+              processingTeacherUid={processingTeacherUid}
+            />
+          )}
 
           {activeTab === 'config' && (
             <ConfigTab

@@ -389,9 +389,34 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["ownerUid", "subjectKey", "date", "topicId", "studentCode", "studentName", "team", "errorCategory", "status", "recordedBy", "timestampMs", "createdAt", "updatedAt"]
+    },
+    "TeacherAccessRequest": {
+      "title": "TeacherAccessRequest",
+      "description": "Yêu cầu đăng ký và trạng thái phê duyệt quyền Giáo viên chủ nhiệm theo Firebase UID",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 150 },
+        "requestedSchool": { "type": "string", "maxLength": 200 },
+        "requestedClass": { "type": "string", "maxLength": 50 },
+        "requestedSubject": { "type": "string", "maxLength": 100 },
+        "requestedYear": { "type": "string", "maxLength": 50 },
+        "note": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected", "revoked"] },
+        "approvedBy": { "type": "string", "maxLength": 200 },
+        "reviewNote": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "status", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
+    "/teacher_access_requests/{userId}": {
+      "schema": { "$ref": "#/entities/TeacherAccessRequest" },
+      "description": "Danh sách yêu cầu cấp quyền và trạng thái phê duyệt tài khoản giáo viên"
+    },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserRoot" },
       "description": "Hồ sơ gốc của giáo viên chủ tài khoản"

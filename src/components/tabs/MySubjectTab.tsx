@@ -31,6 +31,7 @@ import type {
   StudentRecord,
   SubjectScoreRecord,
 } from '../../types/gvcn';
+import { getAuthBearerHeaders } from '../../firebase';
 
 export type SubjectSubTab =
   | 'overview'
@@ -324,9 +325,10 @@ Hãy đề xuất:
 1. Cách phân nhóm bài tập phụ đạo (cơ bản / củng cố / nâng cao) theo đúng kỹ năng còn hổng.
 2. 3 dạng câu hỏi kiểm tra nhanh đầu giờ (5 phút) phù hợp thực tế lớp.`;
 
+      const headers = await getAuthBearerHeaders();
       const res = await fetch('/api/gemini/subject-analyze', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ prompt }),
       });
       const data = await res.json();

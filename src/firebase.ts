@@ -79,6 +79,8 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+export const PRIMARY_ADMIN_EMAIL = 'anh03061987@gmail.com';
+
 export async function signInWithGoogle() {
   googleProvider.setCustomParameters({ prompt: 'select_account' });
   return signInWithPopup(auth, googleProvider);
@@ -87,3 +89,16 @@ export async function signInWithGoogle() {
 export async function signOutUser() {
   return firebaseSignOut(auth);
 }
+
+export async function getAuthBearerHeaders(): Promise<Record<string, string>> {
+  const currentUser = auth.currentUser;
+  if (!currentUser) {
+    throw new Error('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+  }
+  const idToken = await currentUser.getIdToken();
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${idToken}`,
+  };
+}
+

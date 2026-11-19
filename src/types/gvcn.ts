@@ -23,6 +23,24 @@ export interface ClassConfig {
   updatedAt?: unknown;
 }
 
+export type TeacherAccessStatus = 'pending' | 'approved' | 'rejected' | 'revoked';
+
+export interface TeacherAccessRequest {
+  uid: string;
+  email: string;
+  displayName: string;
+  requestedSchool?: string;
+  requestedClass?: string;
+  requestedSubject?: string;
+  requestedYear?: string;
+  note?: string;
+  status: TeacherAccessStatus;
+  approvedBy?: string;
+  reviewNote?: string;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
 export interface SavedWorkspace {
   id: string;
   teacherName: string;

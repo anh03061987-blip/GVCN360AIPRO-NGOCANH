@@ -40,6 +40,16 @@ service cloud.firestore {
       );
     }
 
+    function isApprovedTeacher(userId) {
+      return isOwner(userId) && (
+        isAdmin() ||
+        (
+          exists(/databases/$(database)/documents/teacher_access_requests/$(userId)) &&
+          get(/databases/$(database)/documents/teacher_access_requests/$(userId)).data.status == 'approved'
+        )
+      );
+    }
+
     function hasValidOwnerAndTimestamps(data, userId) {
       return data.ownerUid is string &&
         data.ownerUid == userId &&
@@ -357,16 +367,55 @@ service cloud.firestore {
         data.timestampMs is number;
     }
 
+    function isValidTeacherAccessRequest(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'requestedSchool', 'requestedClass', 'requestedSubject', 'requestedYear', 'note', 'status', 'approvedBy', 'reviewNote', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid == userId && data.uid.size() > 0 && data.uid.size() <= 128 &&
+        data.email is string && data.email.size() > 0 && data.email.size() <= 200 &&
+        data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 150 &&
+        (!('requestedSchool' in data) || (data.requestedSchool is string && data.requestedSchool.size() <= 200)) &&
+        (!('requestedClass' in data) || (data.requestedClass is string && data.requestedClass.size() <= 50)) &&
+        (!('requestedSubject' in data) || (data.requestedSubject is string && data.requestedSubject.size() <= 100)) &&
+        (!('requestedYear' in data) || (data.requestedYear is string && data.requestedYear.size() <= 50)) &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
+        data.status in ['pending', 'approved', 'rejected', 'revoked'] &&
+        (!('approvedBy' in data) || (data.approvedBy is string && data.approvedBy.size() <= 200)) &&
+        (!('reviewNote' in data) || (data.reviewNote is string && data.reviewNote.size() <= 500)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
     // ========================================================================
     // COLLECTION MATCH BLOCKS
     // ========================================================================
-    match /users/{userId} {
+    match /teacher_access_requests/{userId} {
       allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
       allow create: if isValidId(userId) && isOwner(userId) &&
+        isValidTeacherAccessRequest(incoming(), userId) &&
+        incoming().email == request.auth.token.email &&
+        incoming().status == 'pending' &&
+        !('approvedBy' in incoming()) &&
+        !('reviewNote' in incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && isAdmin() &&
+        isValidTeacherAccessRequest(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().email == existing().email &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'approvedBy', 'reviewNote', 'updatedAt']);
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isApprovedTeacher(userId) || isAdmin());
+      allow create: if isValidId(userId) && isApprovedTeacher(userId) &&
         isValidUserRoot(incoming(), userId) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
-      allow update: if isValidId(userId) && (isOwner(userId) || isAdmin()) &&
+      allow update: if isValidId(userId) && (isApprovedTeacher(userId) || isAdmin()) &&
         isValidUserRoot(incoming(), userId) &&
         incoming().uid == existing().uid &&
         incoming().createdAt == existing().createdAt &&
@@ -374,14 +423,14 @@ service cloud.firestore {
         incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'updatedAt']);
 
       match /class_configs/{configId} {
-        allow get: if isValidId(userId) && isValidId(configId) && (isOwner(userId) || isAdmin());
+        allow get: if isValidId(userId) && isValidId(configId) && (isApprovedTeacher(userId) || isAdmin());
         allow list: if isOwner(userId) || isAdmin();
-        allow create: if isValidId(userId) && isValidId(configId) && isOwner(userId) &&
+        allow create: if isValidId(userId) && isValidId(configId) && isApprovedTeacher(userId) &&
           parentUserExists(userId) &&
           isValidClassConfig(incoming(), userId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
-        allow update: if isValidId(userId) && isValidId(configId) && (isOwner(userId) || isAdmin()) &&
+        allow update: if isValidId(userId) && isValidId(configId) && (isApprovedTeacher(userId) || isAdmin()) &&
           isValidClassConfig(incoming(), userId) &&
           incoming().ownerUid == existing().ownerUid &&
           incoming().createdAt == existing().createdAt &&
@@ -394,14 +443,14 @@ service cloud.firestore {
       }
 
       match /saved_workspaces/{workspaceId} {
-        allow get: if isValidId(userId) && isValidId(workspaceId) && (isOwner(userId) || isAdmin());
+        allow get: if isValidId(userId) && isValidId(workspaceId) && (isApprovedTeacher(userId) || isAdmin());
         allow list: if isOwner(userId) || isAdmin();
-        allow create: if isValidId(userId) && isValidId(workspaceId) && isOwner(userId) &&
+        allow create: if isValidId(userId) && isValidId(workspaceId) && isApprovedTeacher(userId) &&
           parentUserExists(userId) &&
           isValidSavedWorkspace(incoming(), userId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
-        allow update: if isValidId(userId) && isValidId(workspaceId) && (isOwner(userId) || isAdmin()) &&
+        allow update: if isValidId(userId) && isValidId(workspaceId) && (isApprovedTeacher(userId) || isAdmin()) &&
           isValidSavedWorkspace(incoming(), userId) &&
           incoming().ownerUid == existing().ownerUid &&
           incoming().createdAt == existing().createdAt &&
