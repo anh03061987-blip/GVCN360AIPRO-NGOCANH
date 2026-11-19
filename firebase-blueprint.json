@@ -410,9 +410,100 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "displayName", "status", "createdAt", "updatedAt"]
+    },
+    "OfficerDirectory": {
+      "title": "OfficerDirectory",
+      "description": "Danh bạ nickname duy nhất toàn hệ thống ánh xạ sang định danh đăng nhập nội bộ (không lưu mật khẩu hay PII)",
+      "type": "object",
+      "properties": {
+        "nickname": { "type": "string", "maxLength": 60 },
+        "nicknameId": { "type": "string", "maxLength": 128 },
+        "authEmail": { "type": "string", "maxLength": 160 },
+        "teacherUid": { "type": "string", "maxLength": 128 },
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "active": { "type": "boolean" },
+        "credentialVersion": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["nickname", "nicknameId", "authEmail", "teacherUid", "workspaceId", "active", "credentialVersion", "createdAt", "updatedAt"]
+    },
+    "OfficerMembership": {
+      "title": "OfficerMembership",
+      "description": "Hồ sơ quyền thực tế của tài khoản Cán bộ lớp theo Firebase UID (hỗ trợ kiêm nhiệm tối đa 2 chức vụ)",
+      "type": "object",
+      "properties": {
+        "officerUid": { "type": "string", "maxLength": 128 },
+        "teacherUid": { "type": "string", "maxLength": 128 },
+        "workspaceId": { "type": "string", "maxLength": 128 },
+        "schoolName": { "type": "string", "maxLength": 200 },
+        "className": { "type": "string", "maxLength": 50 },
+        "schoolYear": { "type": "string", "maxLength": 50 },
+        "teacherName": { "type": "string", "maxLength": 120 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "nickname": { "type": "string", "maxLength": 60 },
+        "nicknameId": { "type": "string", "maxLength": 128 },
+        "roles": { "type": "array" },
+        "assignedTeam": { "type": "number" },
+        "active": { "type": "boolean" },
+        "mustChangePassword": { "type": "boolean" },
+        "credentialVersion": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["officerUid", "teacherUid", "workspaceId", "schoolName", "className", "schoolYear", "teacherName", "studentCode", "studentName", "nickname", "nicknameId", "roles", "assignedTeam", "active", "mustChangePassword", "credentialVersion", "createdAt", "updatedAt"]
+    },
+    "OfficerAccount": {
+      "title": "OfficerAccount",
+      "description": "Bản ghi quản lý tài khoản Cán bộ lớp của GVCN theo mã học sinh (mỗi học sinh tối đa 1 tài khoản)",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "team": { "type": "number" },
+        "nickname": { "type": "string", "maxLength": 60 },
+        "nicknameId": { "type": "string", "maxLength": 128 },
+        "officerUid": { "type": "string", "maxLength": 128 },
+        "authEmail": { "type": "string", "maxLength": 160 },
+        "roles": { "type": "array" },
+        "assignedTeam": { "type": "number" },
+        "active": { "type": "boolean" },
+        "mustChangePassword": { "type": "boolean" },
+        "credentialVersion": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "studentCode", "studentName", "team", "nickname", "nicknameId", "officerUid", "authEmail", "roles", "assignedTeam", "active", "mustChangePassword", "credentialVersion", "createdAt", "updatedAt"]
+    },
+    "PermissionAuditLog": {
+      "title": "PermissionAuditLog",
+      "description": "Nhật ký bất biến các thao tác cấp, khóa, đặt lại mật khẩu và thu hồi quyền Cán bộ lớp",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 80 },
+        "nickname": { "type": "string", "maxLength": 60 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "details": { "type": "string", "maxLength": 600 },
+        "actorEmail": { "type": "string", "maxLength": 200 },
+        "timestampMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "action", "nickname", "studentCode", "studentName", "details", "actorEmail", "timestampMs", "createdAt"]
     }
   },
   "firestore": {
+    "/officer_directory/{nicknameId}": {
+      "schema": { "$ref": "#/entities/OfficerDirectory" },
+      "description": "Danh bạ nickname duy nhất toàn hệ thống cho cán bộ lớp"
+    },
+    "/officer_memberships/{officerUid}": {
+      "schema": { "$ref": "#/entities/OfficerMembership" },
+      "description": "Ánh xạ Firebase UID cán bộ lớp sang lớp học và quyền thực tế"
+    },
     "/teacher_access_requests/{userId}": {
       "schema": { "$ref": "#/entities/TeacherAccessRequest" },
       "description": "Danh sách yêu cầu cấp quyền và trạng thái phê duyệt tài khoản giáo viên"
@@ -420,6 +511,14 @@
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserRoot" },
       "description": "Hồ sơ gốc của giáo viên chủ tài khoản"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/officer_accounts/{studentCode}": {
+      "schema": { "$ref": "#/entities/OfficerAccount" },
+      "description": "Quản lý tài khoản cán bộ lớp của GVCN theo mã học sinh"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/permission_audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/PermissionAuditLog" },
+      "description": "Lịch sử cấp quyền và thay đổi tài khoản cán bộ lớp"
     },
     "/users/{userId}/class_configs/{configId}": {
       "schema": { "$ref": "#/entities/ClassConfig" },

@@ -23,6 +23,9 @@ import type {
   AttendanceRecord,
   AuditLogRecord,
   ClassConfig,
+  OfficerAccountRecord,
+  OfficerRoleId,
+  PermissionAuditLogRecord,
   RoleDefinition,
   StudentPiiRecord,
   StudentRecord,
@@ -30,6 +33,7 @@ import type {
   TeacherAccessStatus,
   WeeklyTeamStat,
 } from '../../types/gvcn';
+import { OfficerManagementSection } from '../OfficerManagementSection';
 import {
   formatDobToDmy,
   getStudentMoetCode,
@@ -744,6 +748,33 @@ interface RolesTabProps {
     nextStatus: TeacherAccessStatus
   ) => Promise<void>;
   processingTeacherUid?: string | null;
+  classConfig?: ClassConfig;
+  students?: StudentRecord[];
+  officerAccounts?: OfficerAccountRecord[];
+  permissionAuditLogs?: PermissionAuditLogRecord[];
+  onCreateOfficerAccount?: (payload: {
+    student: StudentRecord;
+    nickname: string;
+    roles: OfficerRoleId[];
+    initialPassword: string;
+    mustChangePassword: boolean;
+  }) => Promise<{ nickname: string; password: string }>;
+  onUpdateOfficerRoles?: (
+    account: OfficerAccountRecord,
+    nextRoles: OfficerRoleId[]
+  ) => Promise<void>;
+  onToggleOfficerLock?: (account: OfficerAccountRecord) => Promise<void>;
+  onResetOfficerPassword?: (
+    account: OfficerAccountRecord,
+    newPassword: string,
+    mustChangePassword: boolean
+  ) => Promise<{ nickname: string; password: string }>;
+  onBatchResetPasswords?: (
+    accounts: OfficerAccountRecord[],
+    newPassword: string,
+    mustChangePassword: boolean
+  ) => Promise<{ succeeded: string[]; failed: { nickname: string; error: string }[] }>;
+  onDeleteOfficerAccount?: (account: OfficerAccountRecord) => Promise<void>;
 }
 
 export function RolesTab({
@@ -753,6 +784,16 @@ export function RolesTab({
   teacherRequests = [],
   onUpdateTeacherRequestStatus,
   processingTeacherUid = null,
+  classConfig,
+  students = [],
+  officerAccounts = [],
+  permissionAuditLogs = [],
+  onCreateOfficerAccount,
+  onUpdateOfficerRoles,
+  onToggleOfficerLock,
+  onResetOfficerPassword,
+  onBatchResetPasswords,
+  onDeleteOfficerAccount,
 }: RolesTabProps) {
   const pendingTeacherCount = teacherRequests.filter((r) => r.status === 'pending').length;
 
@@ -764,6 +805,28 @@ export function RolesTab({
           Hệ thống tách bạch rõ quyền lập phiếu đề xuất của Ban cán sự lớp và quyền phê duyệt duy nhất của GVCN.
         </p>
       </div>
+
+      {activeRoleId === 'gvcn' &&
+        classConfig &&
+        onCreateOfficerAccount &&
+        onUpdateOfficerRoles &&
+        onToggleOfficerLock &&
+        onResetOfficerPassword &&
+        onBatchResetPasswords &&
+        onDeleteOfficerAccount && (
+          <OfficerManagementSection
+            classConfig={classConfig}
+            students={students}
+            officerAccounts={officerAccounts}
+            permissionAuditLogs={permissionAuditLogs}
+            onCreateOfficerAccount={onCreateOfficerAccount}
+            onUpdateOfficerRoles={onUpdateOfficerRoles}
+            onToggleOfficerLock={onToggleOfficerLock}
+            onResetOfficerPassword={onResetOfficerPassword}
+            onBatchResetPasswords={onBatchResetPasswords}
+            onDeleteOfficerAccount={onDeleteOfficerAccount}
+          />
+        )}
 
       {isPrimaryAdmin && (
         <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">

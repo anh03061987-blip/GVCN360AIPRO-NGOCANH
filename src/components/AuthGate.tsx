@@ -16,8 +16,14 @@ import {
   Send,
   Building2,
   BookOpen,
+  KeyRound,
 } from 'lucide-react';
-import { signInWithGoogle, signOutUser } from '../firebase';
+import {
+  signInWithGoogle,
+  signOutUser,
+  signInOfficerWithNickname,
+  changeCurrentOfficerPassword,
+} from '../firebase';
 import type { TeacherAccessRequest } from '../types/gvcn';
 
 interface AuthGateProps {
@@ -27,9 +33,10 @@ interface AuthGateProps {
 export function AuthGate({ authError }: AuthGateProps) {
   const [loginMode, setLoginMode] = useState<'teacher' | 'officer'>('teacher');
   const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isOfficerSigningIn, setIsOfficerSigningIn] = useState(false);
   const [localError, setLocalError] = useState('');
 
-  // Form Cán bộ lớp (sẵn sàng cho Giai đoạn 3 - tuyệt đối không đăng nhập giả trong React)
+  // Form Cán bộ lớp (xác thực thật qua Firebase Auth Email/Password)
   const [officerNickname, setOfficerNickname] = useState('');
   const [officerPassword, setOfficerPassword] = useState('');
   const [showOfficerPassword, setShowOfficerPassword] = useState(false);
@@ -48,16 +55,23 @@ export function AuthGate({ authError }: AuthGateProps) {
     }
   };
 
-  const handleOfficerSubmit = (e: React.FormEvent) => {
+  const handleOfficerSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLocalError('');
-    if (!officerNickname.trim() || !officerPassword.trim()) {
-      setOfficerNotice('Vui lòng nhập đầy đủ Nickname cán bộ lớp và Mật khẩu do GVCN cấp.');
+    setOfficerNotice('');
+    if (!officerNickname.trim() || !officerPassword) {
+      setLocalError('Vui lòng nhập đầy đủ Nickname cán bộ lớp và Mật khẩu do GVCN cấp.');
       return;
     }
-    setOfficerNotice(
-      'Cổng đăng nhập Nickname & Mật khẩu thật của Cán bộ lớp (qua Firebase Auth / xác thực máy chủ) sẽ được kích hoạt ngay ở Giai đoạn 3 sau khi hoàn tất kiểm thử Giai đoạn 2. Hệ thống không sử dụng đăng nhập giả trên trình duyệt.'
-    );
+    setIsOfficerSigningIn(true);
+    try {
+      await signInOfficerWithNickname(officerNickname, officerPassword);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Không thể đăng nhập Cán bộ lớp.';
+      setLocalError(msg);
+    } finally {
+      setIsOfficerSigningIn(false);
+    }
   };
 
   const displayError = localError || authError;
@@ -275,10 +289,13 @@ export function AuthGate({ authError }: AuthGateProps) {
 
                     <button
                       type="submit"
-                      className="w-full py-3 px-4 rounded-xl bg-[#0C9BA6] hover:bg-teal-700 text-white font-bold text-sm shadow-sm transition-all flex items-center justify-center gap-2"
+                      disabled={isOfficerSigningIn}
+                      className="w-full py-3 px-4 rounded-xl bg-[#0C9BA6] hover:bg-teal-700 disabled:opacity-60 text-white font-bold text-sm shadow-sm transition-all flex items-center justify-center gap-2"
                     >
                       <LogIn className="w-4 h-4" />
-                      <span>Đăng nhập Cán bộ lớp</span>
+                      <span>
+                        {isOfficerSigningIn ? 'Đang xác thực Cán bộ lớp...' : 'Đăng nhập Cán bộ lớp'}
+                      </span>
                     </button>
                   </form>
                 )}
@@ -713,6 +730,192 @@ export function NewTeacherSetupGate({
             >
               <BookOpen className="w-4 h-4" />
               <span>{isSaving ? 'Đang khởi tạo...' : 'Khởi tạo Không gian Lớp học'}</span>
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+interface OfficerChangePasswordModalProps {
+  open: boolean;
+  forced?: boolean;
+  nickname: string;
+  studentName: string;
+  onSuccess: () => Promise<void>;
+  onClose?: () => void;
+}
+
+export function OfficerChangePasswordModal({
+  open,
+  forced = false,
+  nickname,
+  studentName,
+  onSuccess,
+  onClose,
+}: OfficerChangePasswordModalProps) {
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  if (!open) return null;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+
+    if (newPassword.length < 8) {
+      setError('Mật khẩu mới phải có ít nhất 8 ký tự để đảm bảo an toàn.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError('Mật khẩu xác nhận không khớp với mật khẩu mới.');
+      return;
+    }
+    if (!forced && !currentPassword) {
+      setError('Vui lòng nhập mật khẩu hiện tại để xác minh.');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await changeCurrentOfficerPassword(newPassword, currentPassword || undefined);
+      await onSuccess();
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+      if (!forced && onClose) {
+        onClose();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Không thể đổi mật khẩu. Vui lòng thử lại.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+      <div className="max-w-md w-full bg-white rounded-3xl shadow-2xl border border-slate-200 overflow-hidden">
+        <div className="bg-gradient-to-r from-[#0f172a] via-[#102744] to-[#0C9BA6] px-6 py-5 text-white flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-white/15 flex items-center justify-center shrink-0">
+            <KeyRound className="w-5 h-5 text-teal-200" />
+          </div>
+          <div>
+            <h2 className="font-bold text-base">
+              {forced ? 'Đổi mật khẩu bắt buộc lần đầu' : 'Đổi mật khẩu Cán bộ lớp'}
+            </h2>
+            <p className="text-xs text-teal-100">
+              {studentName} • Nickname: <strong>{nickname}</strong>
+            </p>
+          </div>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          <div className="p-3.5 rounded-2xl bg-teal-50/70 border border-teal-200 text-xs text-slate-700 leading-relaxed">
+            {forced
+              ? 'GVCN yêu cầu bạn đặt mật khẩu cá nhân mới (tối thiểu 8 ký tự) trước khi bắt đầu làm việc. Mật khẩu mới được mã hóa trực tiếp trên Firebase Authentication.'
+              : 'Nhập mật khẩu hiện tại và mật khẩu mới (tối thiểu 8 ký tự). Không chia sẻ mật khẩu cho học sinh khác.'}
+          </div>
+
+          {error && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+
+          {!forced && (
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Mật khẩu hiện tại *
+              </label>
+              <input
+                type={showPasswords ? 'text' : 'password'}
+                autoComplete="current-password"
+                required
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                placeholder="Nhập mật khẩu đang dùng"
+                className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-[#0C9BA6]"
+              />
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              Mật khẩu mới (tối thiểu 8 ký tự) *
+            </label>
+            <input
+              type={showPasswords ? 'text' : 'password'}
+              autoComplete="new-password"
+              required
+              minLength={8}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              placeholder="Nhập mật khẩu mới..."
+              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-[#0C9BA6]"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-bold text-slate-700 mb-1">
+              Xác nhận mật khẩu mới *
+            </label>
+            <input
+              type={showPasswords ? 'text' : 'password'}
+              autoComplete="new-password"
+              required
+              minLength={8}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              placeholder="Nhập lại mật khẩu mới..."
+              className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:outline-hidden focus:ring-2 focus:ring-[#0C9BA6]"
+            />
+          </div>
+
+          <label className="inline-flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showPasswords}
+              onChange={(e) => setShowPasswords(e.target.checked)}
+              className="rounded border-slate-300 text-[#0C9BA6] focus:ring-[#0C9BA6]"
+            />
+            <span>Hiển thị mật khẩu</span>
+          </label>
+
+          <div className="pt-2 flex flex-wrap items-center justify-between gap-2.5">
+            {forced ? (
+              <button
+                type="button"
+                onClick={() => signOutUser()}
+                className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-2"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Đăng xuất</span>
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={isSaving}
+                className="px-4 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold"
+              >
+                Hủy
+              </button>
+            )}
+
+            <button
+              type="submit"
+              disabled={isSaving}
+              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-[#102744] to-[#0C9BA6] hover:opacity-95 disabled:opacity-60 text-white text-sm font-bold shadow-sm flex items-center gap-2"
+            >
+              <KeyRound className="w-4 h-4" />
+              <span>{isSaving ? 'Đang cập nhật...' : 'Lưu mật khẩu mới'}</span>
             </button>
           </div>
         </form>

@@ -41,6 +41,80 @@ export interface TeacherAccessRequest {
   updatedAt?: unknown;
 }
 
+export type OfficerRoleId =
+  | 'lop_truong'
+  | 'to_truong_1'
+  | 'to_truong_2'
+  | 'to_truong_3'
+  | 'to_truong_4'
+  | 'thu_quy'
+  | 'bi_thu';
+
+export interface OfficerDirectoryRecord {
+  nickname: string;
+  nicknameId: string;
+  authEmail: string;
+  teacherUid: string;
+  workspaceId: string;
+  active: boolean;
+  credentialVersion: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface OfficerMembershipRecord {
+  officerUid: string;
+  teacherUid: string;
+  workspaceId: string;
+  schoolName: string;
+  className: string;
+  schoolYear: string;
+  teacherName: string;
+  studentCode: string;
+  studentName: string;
+  nickname: string;
+  nicknameId: string;
+  roles: OfficerRoleId[];
+  assignedTeam: number;
+  active: boolean;
+  mustChangePassword: boolean;
+  credentialVersion: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface OfficerAccountRecord {
+  id: string;
+  ownerUid: string;
+  studentCode: string;
+  studentName: string;
+  team: number;
+  nickname: string;
+  nicknameId: string;
+  officerUid: string;
+  authEmail: string;
+  roles: OfficerRoleId[];
+  assignedTeam: number;
+  active: boolean;
+  mustChangePassword: boolean;
+  credentialVersion: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface PermissionAuditLogRecord {
+  id: string;
+  ownerUid: string;
+  action: string;
+  nickname: string;
+  studentCode: string;
+  studentName: string;
+  details: string;
+  actorEmail: string;
+  timestampMs: number;
+  createdAt?: unknown;
+}
+
 export interface SavedWorkspace {
   id: string;
   teacherName: string;
