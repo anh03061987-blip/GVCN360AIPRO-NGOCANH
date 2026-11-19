@@ -1,0 +1,476 @@
+{
+  "entities": {
+    "UserRoot": {
+      "title": "UserRoot",
+      "description": "Hồ sơ gốc của giáo viên sở hữu không gian lớp học",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128 },
+        "email": { "type": "string", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 200 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "createdAt", "updatedAt"]
+    },
+    "ClassConfig": {
+      "title": "ClassConfig",
+      "description": "Cấu hình lớp học, trường học, năm học và số dư quỹ hiện tại",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 120 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "schoolName": { "type": "string", "maxLength": 200 },
+        "className": { "type": "string", "maxLength": 50 },
+        "schoolYear": { "type": "string", "maxLength": 50 },
+        "fundBalance": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "teacherName", "subject", "schoolName", "className", "schoolYear", "fundBalance", "createdAt", "updatedAt"]
+    },
+    "SavedWorkspace": {
+      "title": "SavedWorkspace",
+      "description": "Danh mục không gian lớp học và năm học đã lưu",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "teacherName": { "type": "string", "maxLength": 120 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "schoolName": { "type": "string", "maxLength": 200 },
+        "className": { "type": "string", "maxLength": 50 },
+        "schoolYear": { "type": "string", "maxLength": 50 },
+        "updatedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "teacherName", "subject", "schoolName", "className", "schoolYear", "updatedAtMs", "createdAt", "updatedAt"]
+    },
+    "Student": {
+      "title": "Student",
+      "description": "Hồ sơ học sinh trong lớp",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "maxLength": 40, "pattern": "^[A-Z0-9_\\-]+$" },
+        "moetCode": { "type": "string", "maxLength": 40, "pattern": "^[A-Z0-9_\\-]*$" },
+        "fullName": { "type": "string", "maxLength": 150 },
+        "gender": { "type": "string", "enum": ["Nam", "Nữ"] },
+        "dob": { "type": "string", "maxLength": 30 },
+        "team": { "type": "number" },
+        "role": { "type": "string", "maxLength": 40 },
+        "secondRole": { "type": "string", "maxLength": 40 },
+        "note": { "type": "string", "maxLength": 500 },
+        "meritPoints": { "type": "number" },
+        "attendancePresent": { "type": "number" },
+        "attendanceAbsent": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "code", "fullName", "gender", "team", "role", "meritPoints", "createdAt", "updatedAt"]
+    },
+    "StudentPii": {
+      "title": "StudentPii",
+      "description": "Thông tin liên hệ phụ huynh được tách riêng để bảo vệ PII",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "studentCode": { "type": "string", "maxLength": 40, "pattern": "^[A-Z0-9_\\-]+$" },
+        "parentName": { "type": "string", "maxLength": 150 },
+        "parentPhone": { "type": "string", "maxLength": 30 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "studentCode", "parentPhone", "createdAt", "updatedAt"]
+    },
+    "Ticket": {
+      "title": "Ticket",
+      "description": "Phiếu ghi nhận và đề xuất kiểm duyệt",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "type": { "type": "string", "enum": ["diem_danh", "ne_nep", "thu_chi", "chi_doan", "hoc_tap"] },
+        "typeLabel": { "type": "string", "maxLength": 100 },
+        "studentId": { "type": "string", "maxLength": 64 },
+        "studentName": { "type": "string", "maxLength": 200 },
+        "category": { "type": "string", "maxLength": 150 },
+        "emulationGroup": { "type": "string", "maxLength": 40 },
+        "criterionId": { "type": "string", "maxLength": 40 },
+        "criterionText": { "type": "string", "maxLength": 600 },
+        "suggestedGrade": { "type": "string", "maxLength": 10 },
+        "evidence": { "type": "string", "maxLength": 600 },
+        "weekLabel": { "type": "string", "maxLength": 40 },
+        "amount": { "type": "number" },
+        "date": { "type": "string", "maxLength": 30 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "submittedByRole": { "type": "string", "maxLength": 40 },
+        "submittedByTitle": { "type": "string", "maxLength": 100 },
+        "submittedByUid": { "type": "string", "maxLength": 128 },
+        "status": { "type": "string", "enum": ["pending", "needs_revision", "approved", "rejected"] },
+        "version": { "type": "number" },
+        "approvalId": { "type": "string", "maxLength": 100 },
+        "batchApprovalId": { "type": "string", "maxLength": 100 },
+        "reviewedByTeacher": { "type": "string", "maxLength": 120 },
+        "reviewedByUid": { "type": "string", "maxLength": 128 },
+        "reviewedAtMs": { "type": "number" },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "type", "typeLabel", "studentName", "category", "date", "description", "submittedByRole", "submittedByTitle", "submittedByUid", "status", "version", "createdAtMs", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Nhật ký kiểm duyệt bất biến",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "action": { "type": "string", "maxLength": 80 },
+        "approvalId": { "type": "string", "maxLength": 100 },
+        "batchApprovalId": { "type": "string", "maxLength": 100 },
+        "ticketId": { "type": "string", "maxLength": 128 },
+        "ticketType": { "type": "string", "maxLength": 100 },
+        "summary": { "type": "string", "maxLength": 1200 },
+        "submittedBy": { "type": "string", "maxLength": 120 },
+        "approvedBy": { "type": "string", "maxLength": 200 },
+        "timestampMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "action", "ticketId", "ticketType", "summary", "submittedBy", "approvedBy", "timestampMs", "createdAt"]
+    },
+    "AttendanceRecord": {
+      "title": "AttendanceRecord",
+      "description": "Bản ghi điểm danh chính thức theo buổi",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "date": { "type": "string", "maxLength": 30 },
+        "session": { "type": "string", "enum": ["Sáng", "Chiều"] },
+        "totalStudents": { "type": "number" },
+        "presentCount": { "type": "number" },
+        "excusedCount": { "type": "number" },
+        "unexcusedCount": { "type": "number" },
+        "lateCount": { "type": "number" },
+        "absentSummary": { "type": "string", "maxLength": 2000 },
+        "recordedBy": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "date", "session", "totalStudents", "presentCount", "excusedCount", "unexcusedCount", "lateCount", "absentSummary", "recordedBy", "createdAt", "updatedAt"]
+    },
+    "ClassPlan": {
+      "title": "ClassPlan",
+      "description": "Kế hoạch công tác chủ nhiệm",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "week": { "type": "string", "maxLength": 40 },
+        "title": { "type": "string", "maxLength": 200 },
+        "targetDate": { "type": "string", "maxLength": 30 },
+        "content": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "enum": ["Đang thực hiện", "Hoàn thành"] },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "week", "title", "targetDate", "status", "createdAtMs", "createdAt", "updatedAt"]
+    },
+    "YouthActivity": {
+      "title": "YouthActivity",
+      "description": "Hoạt động phong trào Chi đoàn",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 200 },
+        "date": { "type": "string", "maxLength": 30 },
+        "participantCount": { "type": "number" },
+        "description": { "type": "string", "maxLength": 2000 },
+        "status": { "type": "string", "maxLength": 50 },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "title", "date", "participantCount", "status", "createdAtMs", "createdAt", "updatedAt"]
+    },
+    "SubjectScore": {
+      "title": "SubjectScore",
+      "description": "Bảng điểm môn học giáo viên giảng dạy",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "code": { "type": "string", "maxLength": 40 },
+        "fullName": { "type": "string", "maxLength": 150 },
+        "team": { "type": "number" },
+        "subject": { "type": "string", "maxLength": 100 },
+        "tx1": { "type": "number" },
+        "tx2": { "type": "number" },
+        "gk": { "type": "number" },
+        "ck": { "type": "number" },
+        "avg": { "type": "number" },
+        "note": { "type": "string", "maxLength": 500 },
+        "updatedBy": { "type": "string", "maxLength": 120 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "code", "fullName", "team", "subject", "updatedBy", "createdAt", "updatedAt"]
+    },
+    "VneduImportLog": {
+      "title": "VneduImportLog",
+      "description": "Lịch sử nhập bảng điểm từ vnEdu",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "subject": { "type": "string", "maxLength": 100 },
+        "studentCount": { "type": "number" },
+        "importedBy": { "type": "string", "maxLength": 150 },
+        "importedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "subject", "studentCount", "importedBy", "importedAtMs", "createdAt"]
+    },
+    "Grade12Profile": {
+      "title": "Grade12Profile",
+      "description": "Hồ sơ định hướng tốt nghiệp và xét tuyển Đại học Lớp 12",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "examBlock": { "type": "string", "maxLength": 100 },
+        "targetUniversity": { "type": "string", "maxLength": 200 },
+        "targetMajor": { "type": "string", "maxLength": 200 },
+        "mockScore1": { "type": "string", "maxLength": 30 },
+        "mockScore2": { "type": "string", "maxLength": 30 },
+        "readiness": { "type": "string", "maxLength": 80 },
+        "teacherNote": { "type": "string", "maxLength": 1000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "studentCode", "studentName", "examBlock", "readiness", "createdAt", "updatedAt"]
+    },
+    "EmulationStandards": {
+      "title": "EmulationStandards",
+      "description": "Bộ tiêu chuẩn đánh giá thi đua A/B/C và quy tắc học kỳ",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "gradeA": { "type": "array" },
+        "gradeB": { "type": "array" },
+        "gradeC": { "type": "array" },
+        "severeSemesterFail": { "type": "array" },
+        "semesterRules": { "type": "object" },
+        "teamBonusRule": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "gradeA", "gradeB", "gradeC", "severeSemesterFail", "semesterRules", "teamBonusRule", "createdAt", "updatedAt"]
+    },
+    "EmulationWeekSnapshot": {
+      "title": "EmulationWeekSnapshot",
+      "description": "Bản chốt sổ thi đua tuần bất biến theo sĩ số tại thời điểm chốt",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "weekNumber": { "type": "number" },
+        "weekLabel": { "type": "string", "maxLength": 40 },
+        "monthLabel": { "type": "string", "maxLength": 40 },
+        "semesterLabel": { "type": "string", "maxLength": 40 },
+        "totalLockedStudents": { "type": "number" },
+        "records": { "type": "object" },
+        "teamStats": { "type": "array" },
+        "lockedBy": { "type": "string", "maxLength": 120 },
+        "lockedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "weekNumber", "weekLabel", "monthLabel", "semesterLabel", "totalLockedStudents", "records", "teamStats", "lockedBy", "lockedAtMs", "createdAt", "updatedAt"]
+    },
+    "EmulationWeekDraft": {
+      "title": "EmulationWeekDraft",
+      "description": "Bảng nháp xếp loại thi đua tuần do Tổ trưởng các tổ và GVCN cập nhật trước khi chốt sổ",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "weekNumber": { "type": "number" },
+        "weekLabel": { "type": "string", "maxLength": 40 },
+        "drafts": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "weekNumber", "weekLabel", "drafts", "createdAt", "updatedAt"]
+    },
+    "EmulationAdjustmentLog": {
+      "title": "EmulationAdjustmentLog",
+      "description": "Lịch sử điều chỉnh kết quả thi đua tuần đã chốt",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "weekLabel": { "type": "string", "maxLength": 40 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "team": { "type": "number" },
+        "oldRank": { "type": "string", "enum": ["A", "B", "C"] },
+        "newRank": { "type": "string", "enum": ["A", "B", "C"] },
+        "reason": { "type": "string", "maxLength": 600 },
+        "adjustedBy": { "type": "string", "maxLength": 120 },
+        "timestampMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "weekLabel", "studentCode", "studentName", "team", "oldRank", "newRank", "reason", "adjustedBy", "timestampMs", "createdAt"]
+    },
+    "SubjectTopic": {
+      "title": "SubjectTopic",
+      "description": "Chủ đề và kỹ năng trong Bản đồ kiến thức bộ môn",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "subjectKey": { "type": "string", "maxLength": 100 },
+        "id": { "type": "string", "maxLength": 64 },
+        "semester": { "type": "string", "maxLength": 40 },
+        "topicName": { "type": "string", "maxLength": 200 },
+        "skillName": { "type": "string", "maxLength": 200 },
+        "requirement": { "type": "string", "maxLength": 500 },
+        "createdBy": { "type": "string", "maxLength": 120 },
+        "createdAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "subjectKey", "id", "semester", "topicName", "skillName", "createdAtMs", "createdAt", "updatedAt"]
+    },
+    "SubjectQuickCheck": {
+      "title": "SubjectQuickCheck",
+      "description": "Đánh giá nhanh mức độ hiểu bài theo từng kỹ năng",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "subjectKey": { "type": "string", "maxLength": 100 },
+        "date": { "type": "string", "maxLength": 30 },
+        "topicId": { "type": "string", "maxLength": 64 },
+        "topicName": { "type": "string", "maxLength": 200 },
+        "skillName": { "type": "string", "maxLength": 200 },
+        "semester": { "type": "string", "maxLength": 40 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "team": { "type": "number" },
+        "evidenceType": { "type": "string", "maxLength": 80 },
+        "level": { "type": "string", "enum": ["mastered", "consolidating", "need_support"] },
+        "note": { "type": "string", "maxLength": 500 },
+        "confirmedBy": { "type": "string", "maxLength": 120 },
+        "timestampMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "subjectKey", "date", "topicId", "studentCode", "studentName", "team", "evidenceType", "level", "confirmedBy", "timestampMs", "createdAt", "updatedAt"]
+    },
+    "SubjectErrorLog": {
+      "title": "SubjectErrorLog",
+      "description": "Sổ tay lỗi sai và hướng khắc phục của học sinh",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "subjectKey": { "type": "string", "maxLength": 100 },
+        "date": { "type": "string", "maxLength": 30 },
+        "topicId": { "type": "string", "maxLength": 64 },
+        "topicName": { "type": "string", "maxLength": 200 },
+        "skillName": { "type": "string", "maxLength": 200 },
+        "semester": { "type": "string", "maxLength": 40 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "team": { "type": "number" },
+        "errorCategory": { "type": "string", "maxLength": 150 },
+        "note": { "type": "string", "maxLength": 500 },
+        "remedy": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["unfixed", "fixed"] },
+        "fixedAt": { "type": "string", "maxLength": 30 },
+        "recordedBy": { "type": "string", "maxLength": 120 },
+        "timestampMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "subjectKey", "date", "topicId", "studentCode", "studentName", "team", "errorCategory", "status", "recordedBy", "timestampMs", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserRoot" },
+      "description": "Hồ sơ gốc của giáo viên chủ tài khoản"
+    },
+    "/users/{userId}/class_configs/{configId}": {
+      "schema": { "$ref": "#/entities/ClassConfig" },
+      "description": "Cấu hình lớp học đang hoạt động"
+    },
+    "/users/{userId}/saved_workspaces/{workspaceId}": {
+      "schema": { "$ref": "#/entities/SavedWorkspace" },
+      "description": "Danh sách các không gian lớp học và năm học đã lưu"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/students/{studentCode}": {
+      "schema": { "$ref": "#/entities/Student" },
+      "description": "Danh sách học sinh thuộc không gian lớp học"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/student_pii/{studentCode}": {
+      "schema": { "$ref": "#/entities/StudentPii" },
+      "description": "Số điện thoại phụ huynh tách riêng bảo mật"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/Ticket" },
+      "description": "Phiếu đề xuất chờ kiểm duyệt và đã kiểm duyệt"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/audit_logs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Nhật ký kiểm duyệt bất biến"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/attendance/{attendanceId}": {
+      "schema": { "$ref": "#/entities/AttendanceRecord" },
+      "description": "Sổ điểm danh chính thức theo ngày và buổi"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/plans/{planId}": {
+      "schema": { "$ref": "#/entities/ClassPlan" },
+      "description": "Kế hoạch công tác chủ nhiệm"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/youth/{activityId}": {
+      "schema": { "$ref": "#/entities/YouthActivity" },
+      "description": "Hoạt động Chi đoàn lớp"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/scores/{scoreId}": {
+      "schema": { "$ref": "#/entities/SubjectScore" },
+      "description": "Bảng điểm môn giáo viên giảng dạy"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/vnedu_imports/{importId}": {
+      "schema": { "$ref": "#/entities/VneduImportLog" },
+      "description": "Lịch sử nhập điểm từ tệp vnEdu"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/grade12/{studentCode}": {
+      "schema": { "$ref": "#/entities/Grade12Profile" },
+      "description": "Hồ sơ theo dõi học tập và định hướng lớp 12"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/emulation_standards/{ruleId}": {
+      "schema": { "$ref": "#/entities/EmulationStandards" },
+      "description": "Bộ tiêu chuẩn thi đua của lớp"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/emulation_weeks/{weekDocId}": {
+      "schema": { "$ref": "#/entities/EmulationWeekSnapshot" },
+      "description": "Dữ liệu thi đua tuần đã chốt chính thức"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/emulation_drafts/{weekDocId}": {
+      "schema": { "$ref": "#/entities/EmulationWeekDraft" },
+      "description": "Bảng nháp xếp loại thi đua tuần do Tổ trưởng cập nhật để GVCN kiểm tra và chốt sổ"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/emulation_adjustments/{adjId}": {
+      "schema": { "$ref": "#/entities/EmulationAdjustmentLog" },
+      "description": "Lịch sử điều chỉnh kết quả thi đua bất biến"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/subject_topics/{topicId}": {
+      "schema": { "$ref": "#/entities/SubjectTopic" },
+      "description": "Bản đồ chủ đề và kỹ năng môn học"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/subject_quick_checks/{checkId}": {
+      "schema": { "$ref": "#/entities/SubjectQuickCheck" },
+      "description": "Kết quả kiểm tra nhanh mức độ hiểu bài"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/subject_error_logs/{errorId}": {
+      "schema": { "$ref": "#/entities/SubjectErrorLog" },
+      "description": "Sổ tay lỗi sai và hướng dẫn khắc phục"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "GVCN 360 AI PRO",
+  "description": "Trợ lý Chủ nhiệm & Giảng dạy Bộ môn 4.2 — Quản lý hồ sơ học sinh, điểm danh, thi đua A/B/C chuẩn mực, trung tâm kiểm duyệt, sổ quỹ lớp, nhập điểm vnEdu và phân tích sư phạm AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

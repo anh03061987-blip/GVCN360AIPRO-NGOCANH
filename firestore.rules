@@ -1,0 +1,686 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1 / Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // ========================================================================
+    // GLOBAL HELPERS
+    // ========================================================================
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'anh03061987@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function hasValidOwnerAndTimestamps(data, userId) {
+      return data.ownerUid is string &&
+        data.ownerUid == userId &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function parentUserExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // Connection check doc (read-only single doc get)
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    // ========================================================================
+    // ENTITY VALIDATION HELPERS (Anti-Update-Gap)
+    // ========================================================================
+    function isValidUserRoot(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid == userId && data.uid.size() <= 128 &&
+        data.email is string && data.email.size() <= 200 &&
+        data.displayName is string && data.displayName.size() <= 200 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidClassConfig(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'fundBalance', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'fundBalance', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.teacherName is string && data.teacherName.size() > 0 && data.teacherName.size() <= 120 &&
+        data.subject is string && data.subject.size() > 0 && data.subject.size() <= 100 &&
+        data.schoolName is string && data.schoolName.size() > 0 && data.schoolName.size() <= 200 &&
+        data.className is string && data.className.size() > 0 && data.className.size() <= 50 &&
+        data.schoolYear is string && data.schoolYear.size() > 0 && data.schoolYear.size() <= 50 &&
+        data.fundBalance is number;
+    }
+
+    function isValidSavedWorkspace(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'updatedAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'updatedAtMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.teacherName is string && data.teacherName.size() > 0 && data.teacherName.size() <= 120 &&
+        data.subject is string && data.subject.size() > 0 && data.subject.size() <= 100 &&
+        data.schoolName is string && data.schoolName.size() > 0 && data.schoolName.size() <= 200 &&
+        data.className is string && data.className.size() > 0 && data.className.size() <= 50 &&
+        data.schoolYear is string && data.schoolYear.size() > 0 && data.schoolYear.size() <= 50 &&
+        data.updatedAtMs is number;
+    }
+
+    function isValidStudent(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'code', 'fullName', 'gender', 'team', 'role', 'meritPoints', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'code', 'moetCode', 'fullName', 'gender', 'dob', 'team', 'role', 'secondRole', 'note', 'meritPoints', 'attendancePresent', 'attendanceAbsent', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.code is string && data.code.size() > 0 && data.code.size() <= 40 && data.code.matches('^[A-Z0-9_\\-]+$') &&
+        (!('moetCode' in data) || (data.moetCode is string && data.moetCode.size() <= 40 && (data.moetCode == '' || data.moetCode.matches('^[A-Z0-9_\\-]+$')))) &&
+        data.fullName is string && data.fullName.size() > 0 && data.fullName.size() <= 150 &&
+        data.gender in ['Nam', 'Nữ'] &&
+        (!('dob' in data) || (data.dob is string && data.dob.size() <= 30)) &&
+        data.team is number && data.team >= 1 && data.team <= 4 &&
+        data.role is string && data.role.size() > 0 && data.role.size() <= 40 &&
+        (!('secondRole' in data) || (data.secondRole is string && data.secondRole.size() <= 40)) &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
+        data.meritPoints is number &&
+        (!('attendancePresent' in data) || data.attendancePresent is number) &&
+        (!('attendanceAbsent' in data) || data.attendanceAbsent is number);
+    }
+
+    function isValidStudentPii(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'studentCode', 'parentPhone', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'studentCode', 'parentName', 'parentPhone', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.studentCode is string && data.studentCode.size() > 0 && data.studentCode.size() <= 40 && data.studentCode.matches('^[A-Z0-9_\\-]+$') &&
+        (!('parentName' in data) || (data.parentName is string && data.parentName.size() <= 150)) &&
+        data.parentPhone is string && data.parentPhone.size() <= 30;
+    }
+
+    function isValidTicket(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'type', 'typeLabel', 'studentName', 'category', 'date', 'description', 'submittedByRole', 'submittedByTitle', 'submittedByUid', 'status', 'version', 'createdAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'type', 'typeLabel', 'studentId', 'studentName', 'category', 'emulationGroup', 'criterionId', 'criterionText', 'suggestedGrade', 'evidence', 'weekLabel', 'amount', 'date', 'description', 'submittedByRole', 'submittedByTitle', 'submittedByUid', 'status', 'version', 'approvalId', 'batchApprovalId', 'reviewedByTeacher', 'reviewedByUid', 'reviewedAtMs', 'createdAtMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.type in ['diem_danh', 'ne_nep', 'thu_chi', 'chi_doan', 'hoc_tap'] &&
+        data.typeLabel is string && data.typeLabel.size() <= 100 &&
+        (!('studentId' in data) || data.studentId == null || (data.studentId is string && data.studentId.size() <= 64)) &&
+        data.studentName is string && data.studentName.size() <= 200 &&
+        data.category is string && data.category.size() <= 150 &&
+        (!('emulationGroup' in data) || (data.emulationGroup is string && data.emulationGroup.size() <= 40)) &&
+        (!('criterionId' in data) || (data.criterionId is string && data.criterionId.size() <= 40)) &&
+        (!('criterionText' in data) || (data.criterionText is string && data.criterionText.size() <= 600)) &&
+        (!('suggestedGrade' in data) || (data.suggestedGrade is string && data.suggestedGrade.size() <= 10)) &&
+        (!('evidence' in data) || (data.evidence is string && data.evidence.size() <= 600)) &&
+        (!('weekLabel' in data) || (data.weekLabel is string && data.weekLabel.size() <= 40)) &&
+        (!('amount' in data) || data.amount is number) &&
+        data.date is string && data.date.size() <= 30 &&
+        data.description is string && data.description.size() <= 1000 &&
+        data.submittedByRole is string && data.submittedByRole.size() <= 40 &&
+        data.submittedByTitle is string && data.submittedByTitle.size() <= 100 &&
+        data.submittedByUid is string && data.submittedByUid == userId &&
+        data.status in ['pending', 'needs_revision', 'approved', 'rejected'] &&
+        data.version is number && data.version >= 1 &&
+        (!('approvalId' in data) || data.approvalId == null || (data.approvalId is string && data.approvalId.size() <= 100)) &&
+        (!('batchApprovalId' in data) || data.batchApprovalId == null || (data.batchApprovalId is string && data.batchApprovalId.size() <= 100)) &&
+        (!('reviewedByTeacher' in data) || (data.reviewedByTeacher is string && data.reviewedByTeacher.size() <= 120)) &&
+        (!('reviewedByUid' in data) || (data.reviewedByUid is string && data.reviewedByUid.size() <= 128)) &&
+        (!('reviewedAtMs' in data) || data.reviewedAtMs is number) &&
+        data.createdAtMs is number;
+    }
+
+    function isValidAuditLog(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'action', 'ticketId', 'ticketType', 'summary', 'submittedBy', 'approvedBy', 'timestampMs', 'createdAt']) &&
+        data.keys().hasOnly(['ownerUid', 'action', 'approvalId', 'batchApprovalId', 'ticketId', 'ticketType', 'summary', 'submittedBy', 'approvedBy', 'timestampMs', 'createdAt']) &&
+        data.ownerUid is string && data.ownerUid == userId &&
+        data.createdAt is timestamp &&
+        data.action is string && data.action.size() <= 80 &&
+        (!('approvalId' in data) || data.approvalId == null || (data.approvalId is string && data.approvalId.size() <= 100)) &&
+        (!('batchApprovalId' in data) || data.batchApprovalId == null || (data.batchApprovalId is string && data.batchApprovalId.size() <= 100)) &&
+        data.ticketId is string && data.ticketId.size() <= 128 &&
+        data.ticketType is string && data.ticketType.size() <= 100 &&
+        data.summary is string && data.summary.size() <= 1200 &&
+        data.submittedBy is string && data.submittedBy.size() <= 120 &&
+        data.approvedBy is string && data.approvedBy.size() <= 200 &&
+        data.timestampMs is number;
+    }
+
+    function isValidAttendanceRecord(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'date', 'session', 'totalStudents', 'presentCount', 'excusedCount', 'unexcusedCount', 'lateCount', 'absentSummary', 'recordedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'date', 'session', 'totalStudents', 'presentCount', 'excusedCount', 'unexcusedCount', 'lateCount', 'absentSummary', 'recordedBy', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.date is string && data.date.size() <= 30 &&
+        data.session in ['Sáng', 'Chiều'] &&
+        data.totalStudents is number &&
+        data.presentCount is number &&
+        data.excusedCount is number &&
+        data.unexcusedCount is number &&
+        data.lateCount is number &&
+        data.absentSummary is string && data.absentSummary.size() <= 2000 &&
+        data.recordedBy is string && data.recordedBy.size() <= 120;
+    }
+
+    function isValidClassPlan(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'week', 'title', 'targetDate', 'status', 'createdAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'week', 'title', 'targetDate', 'content', 'status', 'createdAtMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.week is string && data.week.size() <= 40 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+        data.targetDate is string && data.targetDate.size() <= 30 &&
+        (!('content' in data) || (data.content is string && data.content.size() <= 2000)) &&
+        data.status in ['Đang thực hiện', 'Hoàn thành'] &&
+        data.createdAtMs is number;
+    }
+
+    function isValidYouthActivity(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'title', 'date', 'participantCount', 'status', 'createdAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'title', 'date', 'participantCount', 'description', 'status', 'createdAtMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+        data.date is string && data.date.size() <= 30 &&
+        data.participantCount is number &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 2000)) &&
+        data.status is string && data.status.size() <= 50 &&
+        data.createdAtMs is number;
+    }
+
+    function isValidSubjectScore(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'code', 'fullName', 'team', 'subject', 'updatedBy', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'code', 'fullName', 'team', 'subject', 'tx1', 'tx2', 'gk', 'ck', 'avg', 'note', 'updatedBy', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.code is string && data.code.size() <= 40 &&
+        data.fullName is string && data.fullName.size() <= 150 &&
+        data.team is number && data.team >= 1 && data.team <= 4 &&
+        data.subject is string && data.subject.size() <= 100 &&
+        (!('tx1' in data) || data.tx1 == null || data.tx1 is number) &&
+        (!('tx2' in data) || data.tx2 == null || data.tx2 is number) &&
+        (!('gk' in data) || data.gk == null || data.gk is number) &&
+        (!('ck' in data) || data.ck == null || data.ck is number) &&
+        (!('avg' in data) || data.avg == null || data.avg is number) &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
+        data.updatedBy is string && data.updatedBy.size() <= 120;
+    }
+
+    function isValidVneduImportLog(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'subject', 'studentCount', 'importedBy', 'importedAtMs', 'createdAt']) &&
+        data.keys().hasOnly(['ownerUid', 'subject', 'studentCount', 'importedBy', 'importedAtMs', 'createdAt']) &&
+        data.ownerUid is string && data.ownerUid == userId &&
+        data.createdAt is timestamp &&
+        data.subject is string && data.subject.size() <= 100 &&
+        data.studentCount is number &&
+        data.importedBy is string && data.importedBy.size() <= 150 &&
+        data.importedAtMs is number;
+    }
+
+    function isValidGrade12Profile(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'studentCode', 'studentName', 'examBlock', 'readiness', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'studentCode', 'studentName', 'examBlock', 'targetUniversity', 'targetMajor', 'mockScore1', 'mockScore2', 'readiness', 'teacherNote', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.studentCode is string && data.studentCode.size() <= 40 &&
+        data.studentName is string && data.studentName.size() <= 150 &&
+        data.examBlock is string && data.examBlock.size() <= 100 &&
+        (!('targetUniversity' in data) || (data.targetUniversity is string && data.targetUniversity.size() <= 200)) &&
+        (!('targetMajor' in data) || (data.targetMajor is string && data.targetMajor.size() <= 200)) &&
+        (!('mockScore1' in data) || (data.mockScore1 is string && data.mockScore1.size() <= 30)) &&
+        (!('mockScore2' in data) || (data.mockScore2 is string && data.mockScore2.size() <= 30)) &&
+        data.readiness is string && data.readiness.size() <= 80 &&
+        (!('teacherNote' in data) || (data.teacherNote is string && data.teacherNote.size() <= 1000));
+    }
+
+    function isValidEmulationStandards(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'gradeA', 'gradeB', 'gradeC', 'severeSemesterFail', 'semesterRules', 'teamBonusRule', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'gradeA', 'gradeB', 'gradeC', 'severeSemesterFail', 'semesterRules', 'teamBonusRule', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.gradeA is list && data.gradeA.size() <= 50 && (data.gradeA.size() == 0 || data.gradeA[0] is map) &&
+        data.gradeB is list && data.gradeB.size() <= 100 && (data.gradeB.size() == 0 || data.gradeB[0] is map) &&
+        data.gradeC is list && data.gradeC.size() <= 50 && (data.gradeC.size() == 0 || data.gradeC[0] is map) &&
+        data.severeSemesterFail is list && data.severeSemesterFail.size() <= 50 && (data.severeSemesterFail.size() == 0 || data.severeSemesterFail[0] is map) &&
+        data.semesterRules is map &&
+        data.teamBonusRule is map;
+    }
+
+    function isValidEmulationWeekSnapshot(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'weekNumber', 'weekLabel', 'monthLabel', 'semesterLabel', 'totalLockedStudents', 'records', 'teamStats', 'lockedBy', 'lockedAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'weekNumber', 'weekLabel', 'monthLabel', 'semesterLabel', 'totalLockedStudents', 'records', 'teamStats', 'lockedBy', 'lockedAtMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.weekNumber is number && data.weekNumber >= 1 && data.weekNumber <= 52 &&
+        data.weekLabel is string && data.weekLabel.size() <= 40 &&
+        data.monthLabel is string && data.monthLabel.size() <= 40 &&
+        data.semesterLabel is string && data.semesterLabel.size() <= 40 &&
+        data.totalLockedStudents is number &&
+        data.records is map &&
+        data.teamStats is list && data.teamStats.size() <= 10 && (data.teamStats.size() == 0 || data.teamStats[0] is map) &&
+        data.lockedBy is string && data.lockedBy.size() <= 120 &&
+        data.lockedAtMs is number;
+    }
+
+    function isValidEmulationWeekDraft(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'weekNumber', 'weekLabel', 'drafts', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'weekNumber', 'weekLabel', 'drafts', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.weekNumber is number && data.weekNumber >= 1 && data.weekNumber <= 52 &&
+        data.weekLabel is string && data.weekLabel.size() <= 40 &&
+        data.drafts is map;
+    }
+
+    function isValidEmulationAdjustmentLog(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'weekLabel', 'studentCode', 'studentName', 'team', 'oldRank', 'newRank', 'reason', 'adjustedBy', 'timestampMs', 'createdAt']) &&
+        data.keys().hasOnly(['ownerUid', 'weekLabel', 'studentCode', 'studentName', 'team', 'oldRank', 'newRank', 'reason', 'adjustedBy', 'timestampMs', 'createdAt']) &&
+        data.ownerUid is string && data.ownerUid == userId &&
+        data.createdAt is timestamp &&
+        data.weekLabel is string && data.weekLabel.size() <= 40 &&
+        data.studentCode is string && data.studentCode.size() <= 40 &&
+        data.studentName is string && data.studentName.size() <= 150 &&
+        data.team is number && data.team >= 1 && data.team <= 4 &&
+        data.oldRank in ['A', 'B', 'C'] &&
+        data.newRank in ['A', 'B', 'C'] &&
+        data.reason is string && data.reason.size() > 0 && data.reason.size() <= 600 &&
+        data.adjustedBy is string && data.adjustedBy.size() <= 120 &&
+        data.timestampMs is number;
+    }
+
+    function isValidSubjectTopic(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'subjectKey', 'id', 'semester', 'topicName', 'skillName', 'createdAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'subjectKey', 'id', 'semester', 'topicName', 'skillName', 'requirement', 'createdBy', 'createdAtMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.subjectKey is string && data.subjectKey.size() <= 100 &&
+        data.id is string && data.id.size() <= 64 &&
+        data.semester is string && data.semester.size() <= 40 &&
+        data.topicName is string && data.topicName.size() > 0 && data.topicName.size() <= 200 &&
+        data.skillName is string && data.skillName.size() > 0 && data.skillName.size() <= 200 &&
+        (!('requirement' in data) || (data.requirement is string && data.requirement.size() <= 500)) &&
+        (!('createdBy' in data) || (data.createdBy is string && data.createdBy.size() <= 120)) &&
+        data.createdAtMs is number;
+    }
+
+    function isValidSubjectQuickCheck(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'subjectKey', 'date', 'topicId', 'studentCode', 'studentName', 'team', 'evidenceType', 'level', 'confirmedBy', 'timestampMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'subjectKey', 'date', 'topicId', 'topicName', 'skillName', 'semester', 'studentCode', 'studentName', 'team', 'evidenceType', 'level', 'note', 'confirmedBy', 'timestampMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.subjectKey is string && data.subjectKey.size() <= 100 &&
+        data.date is string && data.date.size() <= 30 &&
+        data.topicId is string && data.topicId.size() <= 64 &&
+        (!('topicName' in data) || (data.topicName is string && data.topicName.size() <= 200)) &&
+        (!('skillName' in data) || (data.skillName is string && data.skillName.size() <= 200)) &&
+        (!('semester' in data) || (data.semester is string && data.semester.size() <= 40)) &&
+        data.studentCode is string && data.studentCode.size() <= 40 &&
+        data.studentName is string && data.studentName.size() <= 150 &&
+        data.team is number && data.team >= 1 && data.team <= 4 &&
+        data.evidenceType is string && data.evidenceType.size() <= 80 &&
+        data.level in ['mastered', 'consolidating', 'need_support'] &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
+        data.confirmedBy is string && data.confirmedBy.size() <= 120 &&
+        data.timestampMs is number;
+    }
+
+    function isValidSubjectErrorLog(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'subjectKey', 'date', 'topicId', 'studentCode', 'studentName', 'team', 'errorCategory', 'status', 'recordedBy', 'timestampMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'subjectKey', 'date', 'topicId', 'topicName', 'skillName', 'semester', 'studentCode', 'studentName', 'team', 'errorCategory', 'note', 'remedy', 'status', 'fixedAt', 'recordedBy', 'timestampMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.subjectKey is string && data.subjectKey.size() <= 100 &&
+        data.date is string && data.date.size() <= 30 &&
+        data.topicId is string && data.topicId.size() <= 64 &&
+        (!('topicName' in data) || (data.topicName is string && data.topicName.size() <= 200)) &&
+        (!('skillName' in data) || (data.skillName is string && data.skillName.size() <= 200)) &&
+        (!('semester' in data) || (data.semester is string && data.semester.size() <= 40)) &&
+        data.studentCode is string && data.studentCode.size() <= 40 &&
+        data.studentName is string && data.studentName.size() <= 150 &&
+        data.team is number && data.team >= 1 && data.team <= 4 &&
+        data.errorCategory is string && data.errorCategory.size() <= 150 &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
+        (!('remedy' in data) || (data.remedy is string && data.remedy.size() <= 500)) &&
+        data.status in ['unfixed', 'fixed'] &&
+        (!('fixedAt' in data) || data.fixedAt == null || (data.fixedAt is string && data.fixedAt.size() <= 30)) &&
+        data.recordedBy is string && data.recordedBy.size() <= 120 &&
+        data.timestampMs is number;
+    }
+
+    // ========================================================================
+    // COLLECTION MATCH BLOCKS
+    // ========================================================================
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow create: if isValidId(userId) && isOwner(userId) &&
+        isValidUserRoot(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(userId) && (isOwner(userId) || isAdmin()) &&
+        isValidUserRoot(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'updatedAt']);
+
+      match /class_configs/{configId} {
+        allow get: if isValidId(userId) && isValidId(configId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(configId) && isOwner(userId) &&
+          parentUserExists(userId) &&
+          isValidClassConfig(incoming(), userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && isValidId(configId) && (isOwner(userId) || isAdmin()) &&
+          isValidClassConfig(incoming(), userId) &&
+          incoming().ownerUid == existing().ownerUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          (
+            isAdmin() ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'updatedAt']) ||
+            incoming().diff(existing()).affectedKeys().hasOnly(['fundBalance', 'updatedAt'])
+          );
+      }
+
+      match /saved_workspaces/{workspaceId} {
+        allow get: if isValidId(userId) && isValidId(workspaceId) && (isOwner(userId) || isAdmin());
+        allow list: if isOwner(userId) || isAdmin();
+        allow create: if isValidId(userId) && isValidId(workspaceId) && isOwner(userId) &&
+          parentUserExists(userId) &&
+          isValidSavedWorkspace(incoming(), userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && isValidId(workspaceId) && (isOwner(userId) || isAdmin()) &&
+          isValidSavedWorkspace(incoming(), userId) &&
+          incoming().ownerUid == existing().ownerUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'updatedAtMs', 'updatedAt']);
+      }
+
+      match /workspaces/{workspaceId} {
+        match /students/{studentCode} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidStudent(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin()) &&
+            isValidStudent(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().code == existing().code &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['moetCode', 'fullName', 'gender', 'dob', 'team', 'role', 'secondRole', 'note', 'meritPoints', 'attendancePresent', 'attendanceAbsent', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
+        }
+
+        match /student_pii/{studentCode} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidStudentPii(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin()) &&
+            isValidStudentPii(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().studentCode == existing().studentCode &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['parentName', 'parentPhone', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
+        }
+
+        match /tickets/{ticketId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(ticketId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(ticketId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidTicket(incoming(), userId) &&
+            incoming().status == 'pending' &&
+            incoming().version == 1 &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(ticketId) && (isOwner(userId) || isAdmin()) &&
+            isValidTicket(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            (!(existing().status in ['approved', 'rejected']) || isAdmin()) &&
+            (
+              isAdmin() ||
+              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'version', 'approvalId', 'batchApprovalId', 'reviewedByTeacher', 'reviewedByUid', 'reviewedAtMs', 'updatedAt'])
+            );
+        }
+
+        match /audit_logs/{logId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidAuditLog(incoming(), userId) &&
+            incoming().createdAt == request.time;
+          allow update, delete: if false;
+        }
+
+        match /attendance/{attendanceId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(attendanceId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(attendanceId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidAttendanceRecord(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(attendanceId) && (isOwner(userId) || isAdmin()) &&
+            isValidAttendanceRecord(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['totalStudents', 'presentCount', 'excusedCount', 'unexcusedCount', 'lateCount', 'absentSummary', 'recordedBy', 'updatedAt']);
+        }
+
+        match /plans/{planId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidClassPlan(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && (isOwner(userId) || isAdmin()) &&
+            isValidClassPlan(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'title', 'content', 'targetDate', 'week', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && (isOwner(userId) || isAdmin());
+        }
+
+        match /youth/{activityId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidYouthActivity(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && (isOwner(userId) || isAdmin()) &&
+            isValidYouthActivity(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['title', 'date', 'participantCount', 'description', 'status', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && (isOwner(userId) || isAdmin());
+        }
+
+        match /scores/{scoreId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidSubjectScore(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && (isOwner(userId) || isAdmin()) &&
+            isValidSubjectScore(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['fullName', 'team', 'tx1', 'tx2', 'gk', 'ck', 'avg', 'note', 'updatedBy', 'updatedAt']);
+        }
+
+        match /vnedu_imports/{importId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(importId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(importId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidVneduImportLog(incoming(), userId) &&
+            incoming().createdAt == request.time;
+          allow update, delete: if false;
+        }
+
+        match /grade12/{studentCode} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidGrade12Profile(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin()) &&
+            isValidGrade12Profile(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().studentCode == existing().studentCode &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['studentName', 'examBlock', 'targetUniversity', 'targetMajor', 'mockScore1', 'mockScore2', 'readiness', 'teacherNote', 'updatedAt']);
+        }
+
+        match /emulation_standards/{ruleId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(ruleId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(ruleId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidEmulationStandards(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(ruleId) && (isOwner(userId) || isAdmin()) &&
+            isValidEmulationStandards(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['gradeA', 'gradeB', 'gradeC', 'severeSemesterFail', 'semesterRules', 'teamBonusRule', 'updatedAt']);
+        }
+
+        match /emulation_weeks/{weekDocId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidEmulationWeekSnapshot(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin()) &&
+            isValidEmulationWeekSnapshot(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().weekNumber == existing().weekNumber &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['records', 'teamStats', 'updatedAt']);
+        }
+
+        match /emulation_drafts/{weekDocId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidEmulationWeekDraft(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin()) &&
+            isValidEmulationWeekDraft(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().weekNumber == existing().weekNumber &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['drafts', 'weekLabel', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin());
+        }
+
+        match /emulation_adjustments/{adjId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(adjId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(adjId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidEmulationAdjustmentLog(incoming(), userId) &&
+            incoming().createdAt == request.time;
+          allow update, delete: if false;
+        }
+
+        match /subject_topics/{topicId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidSubjectTopic(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && (isOwner(userId) || isAdmin()) &&
+            isValidSubjectTopic(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['semester', 'topicName', 'skillName', 'requirement', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && (isOwner(userId) || isAdmin());
+        }
+
+        match /subject_quick_checks/{checkId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidSubjectQuickCheck(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && (isOwner(userId) || isAdmin()) &&
+            isValidSubjectQuickCheck(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['evidenceType', 'level', 'note', 'confirmedBy', 'timestampMs', 'updatedAt']);
+        }
+
+        match /subject_error_logs/{errorId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && (isOwner(userId) || isAdmin());
+          allow list: if isOwner(userId) || isAdmin();
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && isOwner(userId) &&
+            parentUserExists(userId) &&
+            isValidSubjectErrorLog(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && (isOwner(userId) || isAdmin()) &&
+            isValidSubjectErrorLog(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'fixedAt', 'note', 'remedy', 'updatedAt']);
+        }
+      }
+    }
+  }
+}
