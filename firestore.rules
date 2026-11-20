@@ -96,7 +96,7 @@ service cloud.firestore {
 
     function officerCanCreateTicketType(userId, workspaceId, ticketType, roleId) {
       return officerHasRole(userId, workspaceId, roleId) && (
-        (roleId == 'lop_truong' && ticketType == 'diem_danh') ||
+        (roleId == 'lop_truong' && (ticketType in ['diem_danh', 'ne_nep'])) ||
         ((roleId in ['to_truong_1', 'to_truong_2', 'to_truong_3', 'to_truong_4']) && (ticketType in ['diem_danh', 'ne_nep'])) ||
         (roleId == 'thu_quy' && ticketType == 'thu_chi') ||
         (roleId == 'bi_thu' && ticketType == 'chi_doan')
@@ -450,7 +450,7 @@ service cloud.firestore {
 
     function isValidOfficerMembership(data, officerUid) {
       return data.keys().hasAll(['officerUid', 'teacherUid', 'workspaceId', 'schoolName', 'className', 'schoolYear', 'teacherName', 'studentCode', 'studentName', 'nickname', 'nicknameId', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'credentialVersion', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['officerUid', 'teacherUid', 'workspaceId', 'schoolName', 'className', 'schoolYear', 'teacherName', 'studentCode', 'studentName', 'nickname', 'nicknameId', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'credentialVersion', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['officerUid', 'teacherUid', 'workspaceId', 'schoolName', 'className', 'schoolYear', 'teacherName', 'studentCode', 'studentName', 'nickname', 'nicknameId', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'allowDirectClassAttendance', 'lastLoginAtMs', 'credentialVersion', 'createdAt', 'updatedAt']) &&
         data.officerUid is string && data.officerUid == officerUid && isValidId(data.officerUid) &&
         data.teacherUid is string && isValidId(data.teacherUid) &&
         data.workspaceId is string && isValidId(data.workspaceId) &&
@@ -466,6 +466,8 @@ service cloud.firestore {
         data.assignedTeam is number && data.assignedTeam >= 0 && data.assignedTeam <= 4 &&
         data.active is bool &&
         data.mustChangePassword is bool &&
+        (!('allowDirectClassAttendance' in data) || data.allowDirectClassAttendance is bool) &&
+        (!('lastLoginAtMs' in data) || data.lastLoginAtMs is number) &&
         data.credentialVersion is number && data.credentialVersion >= 1 && data.credentialVersion <= 100 &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -473,7 +475,7 @@ service cloud.firestore {
 
     function isValidOfficerAccount(data, userId) {
       return data.keys().hasAll(['ownerUid', 'studentCode', 'studentName', 'team', 'nickname', 'nicknameId', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'credentialVersion', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['ownerUid', 'studentCode', 'studentName', 'team', 'nickname', 'nicknameId', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'credentialVersion', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'studentCode', 'studentName', 'team', 'nickname', 'nicknameId', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'createdAt', 'updatedAt']) &&
         hasValidOwnerAndTimestamps(data, userId) &&
         data.studentCode is string && data.studentCode.size() > 0 && data.studentCode.size() <= 40 &&
         data.studentName is string && data.studentName.size() > 0 && data.studentName.size() <= 150 &&
@@ -486,6 +488,7 @@ service cloud.firestore {
         data.assignedTeam is number && data.assignedTeam >= 0 && data.assignedTeam <= 4 &&
         data.active is bool &&
         data.mustChangePassword is bool &&
+        (!('allowDirectClassAttendance' in data) || data.allowDirectClassAttendance is bool) &&
         data.credentialVersion is number && data.credentialVersion >= 1 && data.credentialVersion <= 100;
     }
 
@@ -547,7 +550,7 @@ service cloud.firestore {
         (
           (
             (isApprovedTeacher(existing().teacherUid) || isAdmin()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['roles', 'assignedTeam', 'active', 'mustChangePassword', 'credentialVersion', 'teacherName', 'schoolName', 'className', 'schoolYear', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['roles', 'assignedTeam', 'active', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'teacherName', 'schoolName', 'className', 'schoolYear', 'updatedAt'])
           ) ||
           (
             isSignedIn() &&
@@ -555,6 +558,12 @@ service cloud.firestore {
             existing().active == true &&
             incoming().mustChangePassword == false &&
             incoming().diff(existing()).affectedKeys().hasOnly(['mustChangePassword', 'updatedAt'])
+          ) ||
+          (
+            isSignedIn() &&
+            request.auth.uid == officerUid &&
+            existing().active == true &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['lastLoginAtMs', 'updatedAt'])
           )
         );
       allow delete: if isValidId(officerUid) && (isApprovedTeacher(existing().teacherUid) || isAdmin());
@@ -646,7 +655,7 @@ service cloud.firestore {
             incoming().studentCode == existing().studentCode &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['studentName', 'team', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'credentialVersion', 'updatedAt']);
+            incoming().diff(existing()).affectedKeys().hasOnly(['studentName', 'team', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'updatedAt']);
           allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isApprovedTeacher(userId) || isAdmin());
         }
 

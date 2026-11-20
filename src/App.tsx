@@ -45,6 +45,8 @@ import {
   ListChecks,
   Aperture,
   KeyRound,
+  FileText,
+  Send,
 } from 'lucide-react';
 import {
   auth,
@@ -55,7 +57,6 @@ import {
   signOutUser,
   PRIMARY_ADMIN_EMAIL,
   getAuthBearerHeaders,
-  buildOfficerAuthEmail,
   getTeamFromOfficerRoles,
   isOfficerAuthEmail,
   nicknameToDocId,
@@ -141,6 +142,12 @@ import {
 import { MySubjectTab, type SubjectSubTab } from './components/tabs/MySubjectTab';
 import { LuckyWheelTab } from './components/tabs/LuckyWheelTab';
 import {
+  MonitorOverviewTab,
+  MonitorAttendanceTab,
+  MonitorClassReportTab,
+  MonitorSentTicketsTab,
+} from './components/tabs/MonitorWorkspaceTabs';
+import {
   buildParsedStudentRows,
   detectStudentHeaderAndMapping,
   extractSheetMatrix,
@@ -207,8 +214,12 @@ export default function App() {
   const [officerMembershipLoading, setOfficerMembershipLoading] = useState(false);
   const [showOfficerChangePasswordModal, setShowOfficerChangePasswordModal] = useState(false);
   const [officerAccounts, setOfficerAccounts] = useState<OfficerAccountRecord[]>([]);
+  const [officerLoginStatusMap, setOfficerLoginStatusMap] = useState<
+    Record<string, { lastLoginAtMs?: number; mustChangePassword?: boolean }>
+  >({});
   const [permissionAuditLogs, setPermissionAuditLogs] = useState<PermissionAuditLogRecord[]>([]);
   const previousAuthUidRef = useRef<string | null>(null);
+  const recordedOfficerLoginUidRef = useRef<string | null>(null);
 
   const isPrimaryAdmin = useMemo(
     () =>
@@ -222,24 +233,39 @@ export default function App() {
   );
 
   const isRealOfficer = sessionKind === 'officer' && Boolean(officerMembership?.active);
+  const isRealMonitor = isRealOfficer && Boolean(officerMembership?.roles?.includes('lop_truong'));
 
   const officerAllowedTabs = useMemo(() => {
     if (sessionKind !== 'officer' || !officerMembership?.active) return null;
-    const allowed = new Set<string>(['tickets']);
     const roles = officerMembership.roles || [];
-    if (roles.includes('lop_truong')) {
-      allowed.add('attendance');
-      allowed.add('students');
+    const hasMonitor = roles.includes('lop_truong');
+    const hasTeamLeader = roles.some((r) => r.startsWith('to_truong_'));
+    const hasTreasurer = roles.includes('thu_quy');
+    const hasSecretary = roles.includes('bi_thu');
+
+    const allowed = new Set<string>();
+    if (hasMonitor) {
+      // Không gian làm việc riêng của Lớp trưởng: đúng 4 menu gọn gàng
+      allowed.add('monitor_overview');
+      allowed.add('monitor_attendance');
+      allowed.add('monitor_report');
+      allowed.add('monitor_tickets');
+    } else {
+      allowed.add('tickets');
     }
-    if (roles.some((r) => r.startsWith('to_truong_'))) {
+
+    if (hasTeamLeader) {
       allowed.add('students');
       allowed.add('emulation_standards');
+      allowed.add('tickets');
     }
-    if (roles.includes('thu_quy')) {
+    if (hasTreasurer) {
       allowed.add('fund');
+      allowed.add('tickets');
     }
-    if (roles.includes('bi_thu')) {
+    if (hasSecretary) {
       allowed.add('plans');
+      allowed.add('tickets');
     }
     return allowed;
   }, [sessionKind, officerMembership]);
@@ -574,7 +600,9 @@ export default function App() {
     setOfficerMembershipLoading(false);
     setShowOfficerChangePasswordModal(false);
     setOfficerAccounts([]);
+    setOfficerLoginStatusMap({});
     setPermissionAuditLogs([]);
+    recordedOfficerLoginUidRef.current = null;
     seededTopicsRef.current = {};
   };
 
@@ -694,6 +722,13 @@ export default function App() {
 
         setOfficerMembership(data);
         setOfficerMembershipLoading(false);
+        if (recordedOfficerLoginUidRef.current !== user.uid) {
+          recordedOfficerLoginUidRef.current = user.uid;
+          updateDoc(doc(db, 'officer_memberships', user.uid), {
+            lastLoginAtMs: Date.now(),
+            updatedAt: serverTimestamp(),
+          }).catch(() => {});
+        }
         setClassConfig({
           teacherName: data.teacherName || 'GVCN',
           subject: 'Cán bộ lớp',
@@ -741,11 +776,49 @@ export default function App() {
     return () => unsubMem();
   }, [user, sessionKind]);
 
+  // GVCN tải trạng thái đăng nhập gần nhất (lastLoginAtMs) từ officer_memberships/{uid}
+  useEffect(() => {
+    if (!user || sessionKind !== 'teacher' || officerAccounts.length === 0) {
+      setOfficerLoginStatusMap({});
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(
+        officerAccounts.map(async (acc) => {
+          try {
+            const snap = await getDoc(doc(db, 'officer_memberships', acc.officerUid));
+            if (snap.exists()) {
+              const d = snap.data() as OfficerMembershipRecord;
+              return [
+                acc.officerUid,
+                {
+                  lastLoginAtMs: typeof d.lastLoginAtMs === 'number' ? d.lastLoginAtMs : undefined,
+                  mustChangePassword: Boolean(d.mustChangePassword),
+                },
+              ] as const;
+            }
+          } catch {
+            // Bỏ qua nếu membership đã bị xóa
+          }
+          return [acc.officerUid, {}] as const;
+        })
+      );
+      if (!cancelled) {
+        setOfficerLoginStatusMap(Object.fromEntries(entries));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user, sessionKind, officerAccounts]);
+
   // Tự động đưa Cán bộ lớp về tab hợp lệ được cấp quyền
   useEffect(() => {
     if (!officerAllowedTabs) return;
     if (!officerAllowedTabs.has(activeTab)) {
-      if (officerAllowedTabs.has('attendance')) setActiveTab('attendance');
+      if (officerAllowedTabs.has('monitor_overview')) setActiveTab('monitor_overview');
+      else if (officerAllowedTabs.has('attendance')) setActiveTab('attendance');
       else if (officerAllowedTabs.has('fund')) setActiveTab('fund');
       else if (officerAllowedTabs.has('plans')) setActiveTab('plans');
       else setActiveTab('tickets');
@@ -2068,6 +2141,7 @@ export default function App() {
     roles: OfficerRoleId[];
     initialPassword: string;
     mustChangePassword: boolean;
+    allowDirectClassAttendance?: boolean;
   }): Promise<{ nickname: string; password: string }> => {
     if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
       throw new Error('Chỉ Giáo viên chủ nhiệm mới có quyền tạo tài khoản Cán bộ lớp.');
@@ -2101,9 +2175,16 @@ export default function App() {
       );
     }
 
-    const authEmail = buildOfficerAuthEmail(nickId, 1);
-    const officerUid = await provisionOfficerAuthCredential(authEmail, payload.initialPassword);
+    // Cấp tài khoản Firebase Auth thật qua backend bảo vệ (không đụng phiên Google của GVCN)
+    const provisioned = await provisionOfficerAuthCredential(cleanNickname, payload.initialPassword, {
+      mode: 'create',
+      credentialVersion: 1,
+    });
+    const officerUid = provisioned.officerUid;
+    const authEmail = provisioned.authEmail;
     const assignedTeam = getTeamFromOfficerRoles(uniqueRoles);
+    const allowDirectAttendance =
+      uniqueRoles.includes('lop_truong') && Boolean(payload.allowDirectClassAttendance);
 
     await setDoc(dirRef, {
       nickname: cleanNickname,
@@ -2131,6 +2212,7 @@ export default function App() {
       nicknameId: nickId,
       roles: uniqueRoles,
       assignedTeam,
+      allowDirectClassAttendance: allowDirectAttendance,
       active: true,
       mustChangePassword: Boolean(payload.mustChangePassword),
       credentialVersion: 1,
@@ -2151,6 +2233,7 @@ export default function App() {
         authEmail,
         roles: uniqueRoles,
         assignedTeam,
+        allowDirectClassAttendance: allowDirectAttendance,
         active: true,
         mustChangePassword: Boolean(payload.mustChangePassword),
         credentialVersion: 1,
@@ -2165,7 +2248,13 @@ export default function App() {
       nickname: cleanNickname,
       studentCode: payload.student.code,
       studentName: payload.student.fullName,
-      details: `Cấp tài khoản thật cho ${payload.student.fullName} với vai trò: ${roleTitles}.`,
+      details: `Cấp tài khoản thật cho ${payload.student.fullName} với vai trò: ${roleTitles}${
+        uniqueRoles.includes('lop_truong')
+          ? allowDirectAttendance
+            ? ' (cho phép điểm danh trực tiếp toàn lớp)'
+            : ' (chế độ tổng hợp chuyên cần mặc định)'
+          : ''
+      }.`,
     });
 
     showToast(`Đã tạo tài khoản thật ${cleanNickname} cho ${payload.student.fullName}!`);
@@ -2185,9 +2274,13 @@ export default function App() {
     }
 
     const nextAssignedTeam = getTeamFromOfficerRoles(uniqueRoles);
+    const nextAllowDirect = uniqueRoles.includes('lop_truong')
+      ? Boolean(account.allowDirectClassAttendance)
+      : false;
     await updateDoc(doc(db, 'officer_memberships', account.officerUid), {
       roles: uniqueRoles,
       assignedTeam: nextAssignedTeam,
+      allowDirectClassAttendance: nextAllowDirect,
       updatedAt: serverTimestamp(),
     });
     await updateDoc(
@@ -2195,6 +2288,7 @@ export default function App() {
       {
         roles: uniqueRoles,
         assignedTeam: nextAssignedTeam,
+        allowDirectClassAttendance: nextAllowDirect,
         updatedAt: serverTimestamp(),
       }
     );
@@ -2208,6 +2302,39 @@ export default function App() {
       details: `Cập nhật vai trò thành: ${roleTitles}.`,
     });
     showToast(`Đã cập nhật vai trò cho ${account.nickname}: ${roleTitles}.`);
+  };
+
+  const handleToggleMonitorDirectAttendance = async (account: OfficerAccountRecord) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      throw new Error('Chỉ GVCN mới có quyền bật/tắt điểm danh trực tiếp toàn lớp.');
+    }
+    if (!account.roles.includes('lop_truong')) return;
+    const nextAllow = !Boolean(account.allowDirectClassAttendance);
+    await updateDoc(doc(db, 'officer_memberships', account.officerUid), {
+      allowDirectClassAttendance: nextAllow,
+      updatedAt: serverTimestamp(),
+    });
+    await updateDoc(
+      doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'officer_accounts', account.studentCode),
+      {
+        allowDirectClassAttendance: nextAllow,
+        updatedAt: serverTimestamp(),
+      }
+    );
+    await appendPermissionAuditLog({
+      action: nextAllow ? 'Bật điểm danh trực tiếp toàn lớp' : 'Tắt điểm danh trực tiếp toàn lớp',
+      nickname: account.nickname,
+      studentCode: account.studentCode,
+      studentName: account.studentName,
+      details: nextAllow
+        ? `GVCN cho phép Lớp trưởng (${account.nickname}) lập phiếu điểm danh trực tiếp toàn lớp.`
+        : `GVCN đưa Lớp trưởng (${account.nickname}) về chế độ mặc định (chỉ tổng hợp chuyên cần từ 4 Tổ trưởng).`,
+    });
+    showToast(
+      nextAllow
+        ? `Đã bật quyền điểm danh trực tiếp toàn lớp cho ${account.nickname}.`
+        : `Đã tắt quyền điểm danh trực tiếp toàn lớp cho ${account.nickname}.`
+    );
   };
 
   const handleToggleOfficerLock = async (account: OfficerAccountRecord) => {
@@ -2261,8 +2388,12 @@ export default function App() {
     if (nextVersion > 100) {
       throw new Error('Đã vượt quá giới hạn 100 lần xoay phiên mật khẩu. Hãy xóa và tạo lại tài khoản.');
     }
-    const nextAuthEmail = buildOfficerAuthEmail(account.nicknameId, nextVersion);
-    const newOfficerUid = await provisionOfficerAuthCredential(nextAuthEmail, newPassword);
+    const provisioned = await provisionOfficerAuthCredential(account.nickname, newPassword, {
+      mode: 'reset',
+      credentialVersion: nextVersion,
+    });
+    const newOfficerUid = provisioned.officerUid;
+    const nextAuthEmail = provisioned.authEmail;
 
     await setDoc(doc(db, 'officer_memberships', newOfficerUid), {
       officerUid: newOfficerUid,
@@ -2278,6 +2409,7 @@ export default function App() {
       nicknameId: account.nicknameId,
       roles: account.roles,
       assignedTeam: account.assignedTeam,
+      allowDirectClassAttendance: Boolean(account.allowDirectClassAttendance),
       active: account.active,
       mustChangePassword: Boolean(mustChangePassword),
       credentialVersion: nextVersion,
@@ -2369,6 +2501,103 @@ export default function App() {
       });
     }
     showToast('Đã đổi mật khẩu Cán bộ lớp thành công!');
+  };
+
+  // Lớp trưởng gửi báo cáo tổng hợp chuyên cần trong ngày (luôn ở trạng thái chờ GVCN duyệt)
+  const handleSubmitMonitorAttendanceSummary = async (payload: {
+    date: string;
+    session: 'Sáng' | 'Chiều';
+    totalStudents: number;
+    presentCount: number;
+    excusedCount: number;
+    unexcusedCount: number;
+    lateCount: number;
+    unverifiedCount: number;
+    issuesForTeacher: string;
+  }) => {
+    if (!user || !isRealMonitor || !officerMembership) {
+      throw new Error('Chỉ tài khoản Lớp trưởng đã xác thực mới có thể gửi báo cáo tổng hợp chuyên cần.');
+    }
+    const targetOwnerUid = officerMembership.teacherUid;
+    const targetWsId = officerMembership.workspaceId;
+    const submitterTitle =
+      `Lớp trưởng (${officerMembership.studentName} - ${officerMembership.nickname})`.slice(0, 100);
+    const summaryParts = [
+      `Buổi ${payload.session} — Sĩ số: ${payload.presentCount}/${payload.totalStudents}`,
+      `Vắng CP: ${payload.excusedCount}`,
+      `Vắng KP: ${payload.unexcusedCount}`,
+      `Đi muộn: ${payload.lateCount}`,
+      `Chưa xác minh: ${payload.unverifiedCount}`,
+    ];
+    if (payload.issuesForTeacher.trim()) {
+      summaryParts.push(`Đề xuất / Lưu ý GVCN: ${payload.issuesForTeacher.trim()}`);
+    }
+    await addDoc(collection(db, 'users', targetOwnerUid, 'workspaces', targetWsId, 'tickets'), {
+      ownerUid: targetOwnerUid,
+      type: 'diem_danh',
+      typeLabel: TICKET_TYPES.diem_danh.label,
+      studentId: null,
+      studentName: `Tổng hợp chuyên cần lớp ${classConfig.className}`.slice(0, 150),
+      category: `Báo cáo tổng hợp chuyên cần (${payload.session})`.slice(0, 100),
+      date: payload.date,
+      description: summaryParts.join(' | ').slice(0, 2000),
+      submittedByRole: 'lop_truong',
+      submittedByTitle: submitterTitle,
+      submittedByUid: user.uid,
+      status: 'pending',
+      version: 1,
+      createdAtMs: Date.now(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    showToast('Đã gửi báo cáo tổng hợp chuyên cần vào Trung tâm kiểm duyệt của GVCN!');
+  };
+
+  // Lớp trưởng gửi báo cáo tình hình lớp (nề nếp / học tập tập thể / đề xuất GVCN)
+  const handleSubmitMonitorClassReport = async (payload: {
+    date: string;
+    weekLabel: string;
+    generalSituation: string;
+    studyAndDiscipline: string;
+    upcomingTasks: string;
+    positiveHighlights: string;
+    teacherSupportProposals: string;
+  }) => {
+    if (!user || !isRealMonitor || !officerMembership) {
+      throw new Error('Chỉ tài khoản Lớp trưởng đã xác thực mới có thể gửi báo cáo tình hình lớp.');
+    }
+    const targetOwnerUid = officerMembership.teacherUid;
+    const targetWsId = officerMembership.workspaceId;
+    const submitterTitle =
+      `Lớp trưởng (${officerMembership.studentName} - ${officerMembership.nickname})`.slice(0, 100);
+
+    const sections: string[] = [];
+    if (payload.weekLabel.trim()) sections.push(`[${payload.weekLabel.trim()}]`);
+    sections.push(`1. Tình hình chung: ${payload.generalSituation}`);
+    if (payload.studyAndDiscipline) sections.push(`2. Học tập & nề nếp tập thể: ${payload.studyAndDiscipline}`);
+    if (payload.upcomingTasks) sections.push(`3. Công việc lớp cần làm: ${payload.upcomingTasks}`);
+    if (payload.positiveHighlights) sections.push(`4. Việc tích cực: ${payload.positiveHighlights}`);
+    if (payload.teacherSupportProposals) sections.push(`5. Đề xuất GVCN hỗ trợ: ${payload.teacherSupportProposals}`);
+
+    await addDoc(collection(db, 'users', targetOwnerUid, 'workspaces', targetWsId, 'tickets'), {
+      ownerUid: targetOwnerUid,
+      type: 'ne_nep',
+      typeLabel: 'Báo cáo tình hình lớp (Lớp trưởng)',
+      studentId: null,
+      studentName: `Tập thể lớp ${classConfig.className}`.slice(0, 150),
+      category: `Báo cáo tình hình lớp${payload.weekLabel ? ` (${payload.weekLabel})` : ''}`.slice(0, 100),
+      date: payload.date,
+      description: sections.join('\n').slice(0, 2000),
+      submittedByRole: 'lop_truong',
+      submittedByTitle: submitterTitle,
+      submittedByUid: user.uid,
+      status: 'pending',
+      version: 1,
+      createdAtMs: Date.now(),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    });
+    showToast('Đã gửi báo cáo tình hình lớp vào Trung tâm kiểm duyệt của GVCN!');
   };
 
   const bulkImportAnalysis = useMemo(
@@ -4948,6 +5177,11 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
     count?: number;
     badge?: number;
   }[] = [
+    // Không gian làm việc riêng cho Lớp trưởng (chỉ hiển thị với tài khoản Lớp trưởng thật)
+    { id: 'monitor_overview', label: 'Tổng quan lớp trưởng', icon: LayoutDashboard, group: 'Không gian Lớp trưởng' },
+    { id: 'monitor_attendance', label: 'Theo dõi chuyên cần', icon: ClipboardCheck, group: 'Không gian Lớp trưởng' },
+    { id: 'monitor_report', label: 'Báo cáo tình hình lớp', icon: FileText, group: 'Không gian Lớp trưởng' },
+    { id: 'monitor_tickets', label: 'Phiếu đã gửi', icon: Send, group: 'Không gian Lớp trưởng' },
     { id: 'dashboard', label: 'Dashboard điều hành', icon: LayoutDashboard, group: 'Quán xuyến lớp học' },
     { id: 'students', label: 'Hồ sơ học sinh', icon: Users, count: stats.totalStudents, group: 'Quán xuyến lớp học' },
     { id: 'attendance', label: 'Điểm danh hằng ngày', icon: ClipboardCheck, group: 'Quán xuyến lớp học' },
@@ -4973,7 +5207,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
 
   const visibleNavItems = officerAllowedTabs
     ? navItems.filter((item) => officerAllowedTabs.has(item.id))
-    : navItems;
+    : navItems.filter((item) => !item.id.startsWith('monitor_'));
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800 flex flex-col md:flex-row font-sans">
@@ -5004,7 +5238,9 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
             </div>
             <div>
               <h1 className="font-bold text-base tracking-tight text-white">GVCN 360 AI PRO</h1>
-              <p className="text-xs text-teal-300 font-medium">Phiên bản Hoàn thiện • 4.2</p>
+              <p className="text-xs text-teal-300 font-medium">
+                {isRealMonitor ? 'Không gian Lớp trưởng' : 'Phiên bản Hoàn thiện • 4.2'}
+              </p>
             </div>
           </div>
 
@@ -5016,7 +5252,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
             <div className="font-bold text-sm text-white flex items-center justify-between">
               <span>Lớp {classConfig.className}</span>
               <span className="text-xs font-normal px-2 py-0.5 rounded bg-white/15 text-white border border-white/15">
-                Môn {classConfig.subject}
+                {isRealMonitor ? 'Lớp trưởng' : `Môn ${classConfig.subject}`}
               </span>
             </div>
             <div className="text-slate-200 pt-0.5">
@@ -5278,6 +5514,49 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
 
         {/* Nội dung phân hệ */}
         <div className="p-4 md:p-8 max-w-7xl w-full mx-auto space-y-6">
+          {/* Không gian làm việc chuyên biệt dành riêng cho Lớp trưởng */}
+          {isRealMonitor && officerMembership && activeTab === 'monitor_overview' && (
+            <MonitorOverviewTab
+              classConfig={classConfig}
+              membership={officerMembership}
+              currentUserUid={user.uid}
+              students={students}
+              tickets={tickets}
+              attendanceRecords={attendanceRecords}
+              onNavigate={setActiveTab}
+            />
+          )}
+
+          {isRealMonitor && officerMembership && activeTab === 'monitor_attendance' && (
+            <MonitorAttendanceTab
+              classConfig={classConfig}
+              allowDirectClassAttendance={Boolean(officerMembership.allowDirectClassAttendance)}
+              students={students}
+              tickets={tickets}
+              attendanceRecords={attendanceRecords}
+              attendanceDate={attendanceDate}
+              setAttendanceDate={setAttendanceDate}
+              attendanceSession={attendanceSession}
+              setAttendanceSession={setAttendanceSession}
+              dailyAttendanceDraft={dailyAttendanceDraft}
+              setDailyAttendanceDraft={setDailyAttendanceDraft}
+              isSavingAttendance={isSavingAttendance}
+              onSaveDirectClassAttendanceTicket={handleSaveAttendance}
+              onSubmitAttendanceSummary={handleSubmitMonitorAttendanceSummary}
+            />
+          )}
+
+          {isRealMonitor && officerMembership && activeTab === 'monitor_report' && (
+            <MonitorClassReportTab
+              classConfig={classConfig}
+              onSubmitClassReport={handleSubmitMonitorClassReport}
+            />
+          )}
+
+          {isRealMonitor && officerMembership && activeTab === 'monitor_tickets' && (
+            <MonitorSentTicketsTab currentUserUid={user.uid} tickets={tickets} />
+          )}
+
           {!isRealOfficer && activeTab === 'dashboard' && (
             <DashboardTab
               classConfig={classConfig}
@@ -5759,9 +6038,11 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               classConfig={classConfig}
               students={students}
               officerAccounts={officerAccounts}
+              officerLoginStatusMap={officerLoginStatusMap}
               permissionAuditLogs={permissionAuditLogs}
               onCreateOfficerAccount={handleCreateOfficerAccount}
               onUpdateOfficerRoles={handleUpdateOfficerRoles}
+              onToggleMonitorDirectAttendance={handleToggleMonitorDirectAttendance}
               onToggleOfficerLock={handleToggleOfficerLock}
               onResetOfficerPassword={handleResetOfficerPassword}
               onBatchResetPasswords={handleBatchResetPasswords}

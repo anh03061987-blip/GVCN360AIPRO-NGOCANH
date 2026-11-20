@@ -448,6 +448,8 @@
         "assignedTeam": { "type": "number" },
         "active": { "type": "boolean" },
         "mustChangePassword": { "type": "boolean" },
+        "allowDirectClassAttendance": { "type": "boolean" },
+        "lastLoginAtMs": { "type": "number" },
         "credentialVersion": { "type": "number" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
@@ -471,6 +473,7 @@
         "assignedTeam": { "type": "number" },
         "active": { "type": "boolean" },
         "mustChangePassword": { "type": "boolean" },
+        "allowDirectClassAttendance": { "type": "boolean" },
         "credentialVersion": { "type": "number" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }

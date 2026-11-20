@@ -751,6 +751,7 @@ interface RolesTabProps {
   classConfig?: ClassConfig;
   students?: StudentRecord[];
   officerAccounts?: OfficerAccountRecord[];
+  officerLoginStatusMap?: Record<string, { lastLoginAtMs?: number; mustChangePassword?: boolean }>;
   permissionAuditLogs?: PermissionAuditLogRecord[];
   onCreateOfficerAccount?: (payload: {
     student: StudentRecord;
@@ -758,11 +759,13 @@ interface RolesTabProps {
     roles: OfficerRoleId[];
     initialPassword: string;
     mustChangePassword: boolean;
+    allowDirectClassAttendance?: boolean;
   }) => Promise<{ nickname: string; password: string }>;
   onUpdateOfficerRoles?: (
     account: OfficerAccountRecord,
     nextRoles: OfficerRoleId[]
   ) => Promise<void>;
+  onToggleMonitorDirectAttendance?: (account: OfficerAccountRecord) => Promise<void>;
   onToggleOfficerLock?: (account: OfficerAccountRecord) => Promise<void>;
   onResetOfficerPassword?: (
     account: OfficerAccountRecord,
@@ -787,9 +790,11 @@ export function RolesTab({
   classConfig,
   students = [],
   officerAccounts = [],
+  officerLoginStatusMap = {},
   permissionAuditLogs = [],
   onCreateOfficerAccount,
   onUpdateOfficerRoles,
+  onToggleMonitorDirectAttendance,
   onToggleOfficerLock,
   onResetOfficerPassword,
   onBatchResetPasswords,
@@ -818,9 +823,11 @@ export function RolesTab({
             classConfig={classConfig}
             students={students}
             officerAccounts={officerAccounts}
+            officerLoginStatusMap={officerLoginStatusMap}
             permissionAuditLogs={permissionAuditLogs}
             onCreateOfficerAccount={onCreateOfficerAccount}
             onUpdateOfficerRoles={onUpdateOfficerRoles}
+            onToggleMonitorDirectAttendance={onToggleMonitorDirectAttendance}
             onToggleOfficerLock={onToggleOfficerLock}
             onResetOfficerPassword={onResetOfficerPassword}
             onBatchResetPasswords={onBatchResetPasswords}

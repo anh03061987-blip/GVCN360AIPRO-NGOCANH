@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   UserPlus,
   KeyRound,
@@ -15,9 +15,14 @@ import {
   History,
   AlertCircle,
   Users,
+  ExternalLink,
+  ClipboardCheck,
+  Clock,
+  CheckCircle2,
 } from 'lucide-react';
 import { ROLES } from '../constants/gvcnConstants';
 import {
+  checkOfficerAuthHealth,
   generateStrongOfficerPassword,
   normalizeOfficerNickname,
 } from '../firebase';
@@ -67,6 +72,7 @@ export interface OfficerManagementSectionProps {
   classConfig: ClassConfig;
   students: StudentRecord[];
   officerAccounts: OfficerAccountRecord[];
+  officerLoginStatusMap?: Record<string, { lastLoginAtMs?: number; mustChangePassword?: boolean }>;
   permissionAuditLogs: PermissionAuditLogRecord[];
   onCreateOfficerAccount: (payload: {
     student: StudentRecord;
@@ -74,11 +80,13 @@ export interface OfficerManagementSectionProps {
     roles: OfficerRoleId[];
     initialPassword: string;
     mustChangePassword: boolean;
+    allowDirectClassAttendance?: boolean;
   }) => Promise<{ nickname: string; password: string }>;
   onUpdateOfficerRoles: (
     account: OfficerAccountRecord,
     nextRoles: OfficerRoleId[]
   ) => Promise<void>;
+  onToggleMonitorDirectAttendance?: (account: OfficerAccountRecord) => Promise<void>;
   onToggleOfficerLock: (account: OfficerAccountRecord) => Promise<void>;
   onResetOfficerPassword: (
     account: OfficerAccountRecord,
@@ -97,9 +105,11 @@ export function OfficerManagementSection({
   classConfig,
   students,
   officerAccounts,
+  officerLoginStatusMap = {},
   permissionAuditLogs,
   onCreateOfficerAccount,
   onUpdateOfficerRoles,
+  onToggleMonitorDirectAttendance,
   onToggleOfficerLock,
   onResetOfficerPassword,
   onBatchResetPasswords,
@@ -115,8 +125,37 @@ export function OfficerManagementSection({
   const [customPassword, setCustomPassword] = useState('');
   const [showCustomPassword, setShowCustomPassword] = useState(false);
   const [mustChangePassword, setMustChangePassword] = useState(true);
+  const [allowDirectClassAttendance, setAllowDirectClassAttendance] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [formError, setFormError] = useState('');
+
+  // Kiểm tra trạng thái bật Email/Password trên Firebase Authentication
+  const [authHealth, setAuthHealth] = useState<{
+    loading: boolean;
+    emailPasswordEnabled: boolean | null;
+    rawStatus: string;
+    consoleProvidersUrl: string;
+  }>({
+    loading: true,
+    emailPasswordEnabled: null,
+    rawStatus: '',
+    consoleProvidersUrl: 'https://console.firebase.google.com',
+  });
+
+  const refreshAuthHealth = async () => {
+    setAuthHealth((prev) => ({ ...prev, loading: true }));
+    const res = await checkOfficerAuthHealth();
+    setAuthHealth({
+      loading: false,
+      emailPasswordEnabled: res.emailPasswordEnabled,
+      rawStatus: res.rawStatus,
+      consoleProvidersUrl: res.consoleProvidersUrl,
+    });
+  };
+
+  useEffect(() => {
+    void refreshAuthHealth();
+  }, []);
 
   // Hiển thị mật khẩu 1 lần sau khi tạo hoặc đặt lại (không lưu Firestore)
   const [issuedCredential, setIssuedCredential] = useState<{
@@ -195,12 +234,14 @@ export function OfficerManagementSection({
 
     setIsCreating(true);
     try {
+      const includesMonitor = roles.includes('lop_truong');
       const issued = await onCreateOfficerAccount({
         student,
         nickname: cleanNick,
         roles,
         initialPassword: finalPassword,
         mustChangePassword,
+        allowDirectClassAttendance: includesMonitor ? allowDirectClassAttendance : false,
       });
       setIssuedCredential({
         nickname: issued.nickname,
@@ -211,6 +252,7 @@ export function OfficerManagementSection({
       setSelectedStudentCode('');
       setSecondaryRole('');
       setCustomPassword('');
+      setAllowDirectClassAttendance(false);
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Không thể tạo tài khoản cán bộ lớp.');
     } finally {
@@ -343,6 +385,62 @@ export function OfficerManagementSection({
         </div>
 
         <div className="p-5 space-y-6">
+          {/* Trạng thái phương thức Email/Password trên Firebase Authentication */}
+          {!authHealth.loading && authHealth.emailPasswordEnabled === false && (
+            <div className="p-4 rounded-2xl bg-amber-50 border-2 border-amber-300 text-xs text-amber-950 space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="font-bold text-sm flex items-center gap-2 text-amber-900">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>
+                    Phương thức Email/Password chưa được bật trên Firebase Authentication ({authHealth.rawStatus || 'PASSWORD_LOGIN_DISABLED'})
+                  </span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <a
+                    href={authHealth.consoleProvidersUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-3 py-1.5 rounded-lg bg-amber-700 hover:bg-amber-800 text-white font-bold inline-flex items-center gap-1.5"
+                  >
+                    <span>Mở Firebase Console</span>
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => void refreshAuthHealth()}
+                    className="px-2.5 py-1.5 rounded-lg bg-white border border-amber-300 text-amber-900 font-bold inline-flex items-center gap-1 hover:bg-amber-100"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Kiểm tra lại</span>
+                  </button>
+                </div>
+              </div>
+              <p className="leading-relaxed">
+                Để cấp tài khoản và cho phép Cán bộ lớp đăng nhập bằng Nickname + Mật khẩu thật (không ảnh hưởng phiên Google của GVCN), vui lòng bật <strong>Email/Password</strong> trong Firebase Console:
+                <strong> Authentication → Sign-in method → Add new provider → Email/Password → Enable → Save</strong>, sau đó bấm <strong>Kiểm tra lại</strong>.
+              </p>
+            </div>
+          )}
+
+          {!authHealth.loading && authHealth.emailPasswordEnabled === true && (
+            <div className="px-4 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-medium">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>
+                  Firebase Authentication (Email/Password) đang hoạt động. Tài khoản Cán bộ lớp được cấp qua máy chủ bảo vệ, không làm gián đoạn phiên Google của GVCN.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void refreshAuthHealth()}
+                className="text-emerald-700 font-bold hover:underline inline-flex items-center gap-1"
+              >
+                <RefreshCw className="w-3 h-3" />
+                <span>Kiểm tra lại</span>
+              </button>
+            </div>
+          )}
+
           {formError && (
             <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-start gap-2.5">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
@@ -543,6 +641,19 @@ export function OfficerManagementSection({
                   />
                   <span>Bắt buộc đổi mật khẩu khi đăng nhập lần đầu</span>
                 </label>
+                {(primaryRole === 'lop_truong' || secondaryRole === 'lop_truong') && (
+                  <label className="inline-flex items-start gap-2 text-xs text-slate-700 font-medium cursor-pointer bg-white px-2.5 py-2 rounded-xl border border-slate-200">
+                    <input
+                      type="checkbox"
+                      checked={allowDirectClassAttendance}
+                      onChange={(e) => setAllowDirectClassAttendance(e.target.checked)}
+                      className="rounded border-slate-300 text-[#0C9BA6] focus:ring-[#0C9BA6] mt-0.5"
+                    />
+                    <span className="leading-snug">
+                      Cho phép Lớp trưởng <strong>điểm danh trực tiếp toàn lớp</strong> (mặc định TẮT — chỉ tổng hợp từ 4 Tổ trưởng)
+                    </span>
+                  </label>
+                )}
                 <button
                   type="submit"
                   disabled={isCreating || availableStudents.length === 0}
@@ -602,6 +713,13 @@ export function OfficerManagementSection({
                   <tbody className="divide-y divide-slate-100">
                     {officerAccounts.map((acc) => {
                       const isBusy = busyStudentCode === acc.studentCode;
+                      const liveStatus = officerLoginStatusMap[acc.officerUid];
+                      const lastLoginAtMs = liveStatus?.lastLoginAtMs;
+                      const effectiveMustChange =
+                        liveStatus?.mustChangePassword !== undefined
+                          ? liveStatus.mustChangePassword
+                          : acc.mustChangePassword;
+                      const isMonitorAccount = acc.roles.includes('lop_truong');
                       return (
                         <tr key={acc.studentCode} className="hover:bg-slate-50/70">
                           <td className="py-3 px-3">
@@ -640,6 +758,47 @@ export function OfficerManagementSection({
                                 Phạm vi tổ phụ trách: Tổ {acc.assignedTeam}
                               </div>
                             )}
+                            {isMonitorAccount && (
+                              <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                <span
+                                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold border ${
+                                    acc.allowDirectClassAttendance
+                                      ? 'bg-teal-50 text-teal-800 border-teal-200'
+                                      : 'bg-slate-100 text-slate-600 border-slate-200'
+                                  }`}
+                                >
+                                  <ClipboardCheck className="w-3 h-3" />
+                                  <span>
+                                    Điểm danh trực tiếp toàn lớp:{' '}
+                                    {acc.allowDirectClassAttendance ? 'BẬT' : 'TẮT (mặc định)'}
+                                  </span>
+                                </span>
+                                {onToggleMonitorDirectAttendance && (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={async () => {
+                                      setBusyStudentCode(acc.studentCode);
+                                      setFormError('');
+                                      try {
+                                        await onToggleMonitorDirectAttendance(acc);
+                                      } catch (err) {
+                                        setFormError(
+                                          err instanceof Error
+                                            ? err.message
+                                            : 'Không thể cập nhật quyền điểm danh trực tiếp.'
+                                        );
+                                      } finally {
+                                        setBusyStudentCode(null);
+                                      }
+                                    }}
+                                    className="text-[11px] font-bold text-[#0C9BA6] hover:underline"
+                                  >
+                                    {acc.allowDirectClassAttendance ? 'Tắt' : 'Bật'}
+                                  </button>
+                                )}
+                              </div>
+                            )}
                           </td>
                           <td className="py-3 px-3">
                             <div className="space-y-1">
@@ -652,8 +811,24 @@ export function OfficerManagementSection({
                               >
                                 {acc.active ? 'Đang hoạt động' : 'Đang bị khóa'}
                               </span>
+                              <div className="text-[11px] text-slate-600 flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                                {lastLoginAtMs ? (
+                                  <span>
+                                    Đăng nhập gần nhất:{' '}
+                                    {new Date(lastLoginAtMs).toLocaleString('vi-VN', {
+                                      day: '2-digit',
+                                      month: '2-digit',
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                    })}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">Chưa từng đăng nhập</span>
+                                )}
+                              </div>
                               <div className="text-[11px] text-slate-500">
-                                {acc.mustChangePassword ? 'Chờ đổi MK lần đầu' : 'Đã xác nhận MK'}
+                                {effectiveMustChange ? 'Chờ đổi MK lần đầu' : 'Đã xác nhận MK'}
                               </div>
                             </div>
                           </td>

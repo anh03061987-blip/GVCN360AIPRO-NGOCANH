@@ -78,6 +78,8 @@ export interface OfficerMembershipRecord {
   assignedTeam: number;
   active: boolean;
   mustChangePassword: boolean;
+  allowDirectClassAttendance?: boolean;
+  lastLoginAtMs?: number;
   credentialVersion: number;
   createdAt?: unknown;
   updatedAt?: unknown;
@@ -97,6 +99,7 @@ export interface OfficerAccountRecord {
   assignedTeam: number;
   active: boolean;
   mustChangePassword: boolean;
+  allowDirectClassAttendance?: boolean;
   credentialVersion: number;
   createdAt?: unknown;
   updatedAt?: unknown;

@@ -1,11 +1,10 @@
-import { initializeApp, getApps } from 'firebase/app';
+import { initializeApp } from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
   signOut as firebaseSignOut,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
   updatePassword,
   reauthenticateWithCredential,
   EmailAuthProvider,
@@ -13,11 +12,10 @@ import {
 import {
   getFirestore,
   doc,
-  getDoc,
   getDocFromServer,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
-import type { OfficerDirectoryRecord, OfficerRoleId } from './types/gvcn';
+import type { OfficerRoleId } from './types/gvcn';
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
@@ -212,32 +210,74 @@ function mapFirebaseAuthError(err: unknown): string {
   return err instanceof Error ? err.message : 'Lỗi xác thực Firebase Authentication.';
 }
 
+export interface OfficerAuthHealthStatus {
+  emailPasswordEnabled: boolean;
+  rawStatus: string;
+  projectId: string;
+  consoleProvidersUrl: string;
+}
+
+export async function checkOfficerAuthHealth(): Promise<OfficerAuthHealthStatus> {
+  const headers = await getAuthBearerHeaders();
+  const resp = await fetch('/api/officer/auth-health', {
+    method: 'GET',
+    headers,
+  });
+  const data = (await resp.json().catch(() => ({}))) as Partial<OfficerAuthHealthStatus>;
+  return {
+    emailPasswordEnabled: data.emailPasswordEnabled === true,
+    rawStatus: data.rawStatus || (resp.ok ? 'UNKNOWN' : `HTTP_${resp.status}`),
+    projectId: data.projectId || firebaseConfig.projectId,
+    consoleProvidersUrl:
+      data.consoleProvidersUrl ||
+      `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`,
+  };
+}
+
 /**
- * Tạo tài khoản Firebase Auth thật cho Cán bộ lớp bằng Secondary Auth App
- * để phiên đăng nhập Google của GVCN không bị đăng xuất.
+ * Tạo tài khoản Firebase Auth thật cho Cán bộ lớp thông qua backend được bảo vệ (/api/officer/provision)
+ * để phiên đăng nhập Google hiện tại của GVCN không bao giờ bị ảnh hưởng.
  */
 export async function provisionOfficerAuthCredential(
-  authEmail: string,
-  password: string
-): Promise<string> {
+  nickname: string,
+  password: string,
+  options?: { mode?: 'create' | 'reset'; credentialVersion?: number }
+): Promise<{ officerUid: string; authEmail: string; nickname: string; nicknameId: string }> {
   if (password.length < 8) {
     throw new Error('Mật khẩu cán bộ lớp phải có ít nhất 8 ký tự.');
   }
 
-  const secondaryAppName = 'gvcn360-officer-provisioner';
-  const existingApp = getApps().find((a) => a.name === secondaryAppName);
-  const secondaryApp = existingApp || initializeApp(firebaseConfig, secondaryAppName);
-  const secondaryAuth = getAuth(secondaryApp);
+  const headers = await getAuthBearerHeaders();
+  const resp = await fetch('/api/officer/provision', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      nickname,
+      password,
+      mode: options?.mode || 'create',
+      credentialVersion: options?.credentialVersion || 1,
+    }),
+  });
 
-  try {
-    const cred = await createUserWithEmailAndPassword(secondaryAuth, authEmail, password);
-    const uid = cred.user.uid;
-    await firebaseSignOut(secondaryAuth);
-    return uid;
-  } catch (err) {
-    await firebaseSignOut(secondaryAuth).catch(() => {});
-    throw new Error(mapFirebaseAuthError(err));
+  const data = (await resp.json().catch(() => ({}))) as {
+    ok?: boolean;
+    officerUid?: string;
+    authEmail?: string;
+    nickname?: string;
+    nicknameId?: string;
+    error?: string;
+  };
+
+  if (!resp.ok || !data.ok || !data.officerUid || !data.authEmail) {
+    throw new Error(data.error || `Không thể tạo tài khoản cán bộ lớp (HTTP ${resp.status}).`);
   }
+
+  return {
+    officerUid: data.officerUid,
+    authEmail: data.authEmail,
+    nickname: data.nickname || normalizeOfficerNickname(nickname),
+    nicknameId: data.nicknameId || nicknameToDocId(nickname),
+  };
 }
 
 export async function signInOfficerWithNickname(nicknameRaw: string, password: string) {
@@ -249,19 +289,26 @@ export async function signInOfficerWithNickname(nicknameRaw: string, password: s
     throw new Error('Vui lòng nhập mật khẩu.');
   }
 
-  const nickDocId = nicknameToDocId(normalized);
-  const dirSnap = await getDoc(doc(db, 'officer_directory', nickDocId));
-  if (!dirSnap.exists()) {
-    throw new Error(`Không tìm thấy tài khoản cán bộ lớp "${normalized}". Vui lòng kiểm tra lại với GVCN.`);
-  }
+  const resp = await fetch('/api/officer/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nickname: normalized, password }),
+  });
 
-  const dirData = dirSnap.data() as OfficerDirectoryRecord;
-  if (!dirData.active) {
-    throw new Error(`Tài khoản "${normalized}" hiện đang bị khóa hoặc đã thu hồi quyền.`);
+  const data = (await resp.json().catch(() => ({}))) as {
+    ok?: boolean;
+    authEmail?: string;
+    error?: string;
+  };
+
+  if (!resp.ok || !data.ok || !data.authEmail) {
+    throw new Error(
+      data.error || `Không thể xác thực tài khoản cán bộ lớp "${normalized}" (HTTP ${resp.status}).`
+    );
   }
 
   try {
-    return await signInWithEmailAndPassword(auth, dirData.authEmail, password);
+    return await signInWithEmailAndPassword(auth, data.authEmail, password);
   } catch (err) {
     throw new Error(mapFirebaseAuthError(err));
   }

@@ -172,6 +172,378 @@ app.get('/api/auth/verify', requireApprovedTeacher, (req: AuthenticatedRequest, 
 });
 
 // ============================================================================
+// CLASS OFFICER REAL AUTHENTICATION BACKEND (Zero IAM — Works on Starter & Blaze)
+// ============================================================================
+const OFFICER_AUTH_DOMAIN = 'officers.gvcn360.app';
+const OFFICER_RATE_LIMIT_MAX_ATTEMPTS = 5;
+const OFFICER_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const officerFailedLoginMap = new Map<string, { count: number; lockedUntilMs: number }>();
+
+function normalizeNicknameServer(raw: string): string {
+  return String(raw || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[^a-z0-9._-]/g, '');
+}
+
+function nicknameToDocIdServer(nickname: string): string {
+  return normalizeNicknameServer(nickname)
+    .replace(/\./g, '__dot__')
+    .replace(/[^a-z0-9_-]/g, '_')
+    .slice(0, 120);
+}
+
+function buildOfficerAuthEmailServer(nicknameId: string, credentialVersion: number): string {
+  const safeId = nicknameId.replace(/[^a-z0-9_-]/g, '_');
+  if (credentialVersion <= 1) {
+    return `${safeId}@${OFFICER_AUTH_DOMAIN}`;
+  }
+  return `${safeId}.v${credentialVersion}@${OFFICER_AUTH_DOMAIN}`;
+}
+
+function getClientIp(req: Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+async function fetchOfficerDirectoryDocRest(nicknameId: string): Promise<
+  | { exists: false }
+  | {
+      exists: true;
+      nickname: string;
+      authEmail: string;
+      active: boolean;
+      teacherUid: string;
+      workspaceId: string;
+      credentialVersion: number;
+    }
+> {
+  const dbId = encodeURIComponent(firebaseConfig.firestoreDatabaseId || '(default)');
+  const safeDocId = encodeURIComponent(nicknameId);
+  const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+    firebaseConfig.projectId
+  )}/databases/${dbId}/documents/officer_directory/${safeDocId}`;
+
+  const resp = await fetch(url, {
+    method: 'GET',
+    headers: { Accept: 'application/json' },
+  });
+
+  if (resp.status === 404) {
+    return { exists: false };
+  }
+  if (!resp.ok) {
+    throw new Error(`Không thể tra cứu danh bạ cán bộ lớp (HTTP ${resp.status}).`);
+  }
+
+  const data = (await resp.json()) as {
+    fields?: {
+      nickname?: { stringValue?: string };
+      authEmail?: { stringValue?: string };
+      active?: { booleanValue?: boolean };
+      teacherUid?: { stringValue?: string };
+      workspaceId?: { stringValue?: string };
+      credentialVersion?: { integerValue?: string; doubleValue?: number };
+    };
+  };
+
+  const fields = data.fields || {};
+  return {
+    exists: true,
+    nickname: fields.nickname?.stringValue || nicknameId,
+    authEmail: fields.authEmail?.stringValue || '',
+    active: fields.active?.booleanValue === true,
+    teacherUid: fields.teacherUid?.stringValue || '',
+    workspaceId: fields.workspaceId?.stringValue || '',
+    credentialVersion: Number(
+      fields.credentialVersion?.integerValue ?? fields.credentialVersion?.doubleValue ?? 1
+    ),
+  };
+}
+
+// 1. Kiểm tra trực tiếp xem phương thức Email/Password trên Firebase Auth đã được bật chưa (chỉ GVCN)
+app.get('/api/officer/auth-health', requireApprovedTeacher, async (_req: AuthenticatedRequest, res) => {
+  try {
+    const apiKey = firebaseConfig.apiKey;
+    const probeResp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: `healthcheck_${Date.now()}@${OFFICER_AUTH_DOMAIN}`,
+          password: 'DiagnosticProbePassword99!',
+          returnSecureToken: true,
+        }),
+      }
+    );
+    const probeJson = (await probeResp.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    const errMsg = String(probeJson?.error?.message || '');
+    const emailPasswordEnabled =
+      !errMsg.includes('PASSWORD_LOGIN_DISABLED') && !errMsg.includes('OPERATION_NOT_ALLOWED');
+
+    res.json({
+      emailPasswordEnabled,
+      rawStatus: emailPasswordEnabled ? 'ENABLED' : errMsg || 'PASSWORD_LOGIN_DISABLED',
+      projectId: firebaseConfig.projectId,
+      consoleProvidersUrl: `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`,
+    });
+  } catch (error) {
+    console.error('Officer auth-health check error:', error);
+    res.status(500).json({
+      emailPasswordEnabled: false,
+      rawStatus: 'CHECK_ERROR',
+      projectId: firebaseConfig.projectId,
+      consoleProvidersUrl: `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`,
+    });
+  }
+});
+
+// 2. Tạo tài khoản Firebase Auth thật cho Cán bộ lớp thông qua backend được bảo vệ (không ảnh hưởng phiên Google của GVCN)
+app.post('/api/officer/provision', requireApprovedTeacher, async (req: AuthenticatedRequest, res) => {
+  try {
+    const { nickname, password, mode, credentialVersion } = req.body as {
+      nickname?: string;
+      password?: string;
+      mode?: 'create' | 'reset';
+      credentialVersion?: number;
+    };
+
+    const normalized = normalizeNicknameServer(nickname || '');
+    if (normalized.length < 3 || normalized.length > 60) {
+      res.status(400).json({
+        code: 'INVALID_NICKNAME',
+        error: 'Nickname không hợp lệ (cần 3–60 ký tự chữ thường, số, dấu chấm hoặc gạch dưới).',
+      });
+      return;
+    }
+
+    if (!password || typeof password !== 'string' || password.length < 8) {
+      res.status(400).json({
+        code: 'WEAK_PASSWORD',
+        error: 'Mật khẩu cán bộ lớp phải có tối thiểu 8 ký tự.',
+      });
+      return;
+    }
+
+    const version = Math.max(1, Math.min(100, Math.floor(Number(credentialVersion) || 1)));
+    const nicknameId = nicknameToDocIdServer(normalized);
+
+    if (mode !== 'reset') {
+      const existingDir = await fetchOfficerDirectoryDocRest(nicknameId);
+      if (existingDir.exists) {
+        res.status(409).json({
+          code: 'NICKNAME_EXISTS',
+          error: `Nickname "${normalized}" đã tồn tại trên hệ thống. Vui lòng chọn Nickname khác.`,
+        });
+        return;
+      }
+    }
+
+    const authEmail = buildOfficerAuthEmailServer(nicknameId, version);
+    const signUpResp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: authEmail,
+          password,
+          returnSecureToken: true,
+        }),
+      }
+    );
+
+    const signUpJson = (await signUpResp.json().catch(() => ({}))) as {
+      localId?: string;
+      error?: { message?: string };
+    };
+
+    if (!signUpResp.ok || !signUpJson.localId) {
+      const errCode = String(signUpJson?.error?.message || '');
+      if (errCode.includes('OPERATION_NOT_ALLOWED') || errCode.includes('PASSWORD_LOGIN_DISABLED')) {
+        res.status(503).json({
+          code: 'PASSWORD_LOGIN_DISABLED',
+          error:
+            'Phương thức đăng nhập Email/Password chưa được bật trên Firebase Console của dự án. Vui lòng mở Firebase Console → Authentication → Sign-in method → bật Email/Password rồi bấm Save.',
+          consoleProvidersUrl: `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`,
+        });
+        return;
+      }
+      if (errCode.includes('EMAIL_EXISTS')) {
+        res.status(409).json({
+          code: 'EMAIL_EXISTS',
+          error: `Định danh xác thực cho "${normalized}" (v${version}) đã tồn tại trên Firebase Auth. Hãy tăng phiên bản hoặc chọn nickname khác.`,
+        });
+        return;
+      }
+      if (errCode.includes('WEAK_PASSWORD')) {
+        res.status(400).json({
+          code: 'WEAK_PASSWORD',
+          error: 'Mật khẩu chưa đủ mạnh theo tiêu chuẩn Firebase Authentication (tối thiểu 8 ký tự).',
+        });
+        return;
+      }
+      res.status(500).json({
+        code: 'PROVISION_FAILED',
+        error: `Không thể tạo tài khoản Firebase Auth (${errCode || `HTTP ${signUpResp.status}`}).`,
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      officerUid: signUpJson.localId,
+      authEmail,
+      nickname: normalized,
+      nicknameId,
+      credentialVersion: version,
+    });
+  } catch (error) {
+    console.error('Officer provision error:', error);
+    res.status(500).json({
+      code: 'PROVISION_ERROR',
+      error: error instanceof Error ? error.message : 'Lỗi máy chủ khi khởi tạo tài khoản cán bộ lớp.',
+    });
+  }
+});
+
+// 3. Xác thực Nickname + Mật khẩu Cán bộ lớp có chống dò mật khẩu và chẩn đoán chính xác nguyên nhân
+app.post('/api/officer/login', async (req: Request, res: Response) => {
+  try {
+    const { nickname, password } = req.body as { nickname?: string; password?: string };
+    const normalized = normalizeNicknameServer(nickname || '');
+    if (normalized.length < 3) {
+      res.status(400).json({
+        code: 'INVALID_NICKNAME',
+        error: 'Nickname không hợp lệ (cần tối thiểu 3 ký tự, ví dụ: 12d6.lt).',
+      });
+      return;
+    }
+    if (!password || typeof password !== 'string') {
+      res.status(400).json({
+        code: 'MISSING_PASSWORD',
+        error: 'Vui lòng nhập mật khẩu do GVCN cấp.',
+      });
+      return;
+    }
+
+    const rateKey = `${getClientIp(req)}::${normalized}`;
+    const now = Date.now();
+    const rateState = officerFailedLoginMap.get(rateKey);
+    if (rateState && rateState.lockedUntilMs > now) {
+      const minutesLeft = Math.max(1, Math.ceil((rateState.lockedUntilMs - now) / 60000));
+      res.status(429).json({
+        code: 'RATE_LIMITED',
+        error: `Bạn đã nhập sai mật khẩu quá ${OFFICER_RATE_LIMIT_MAX_ATTEMPTS} lần. Vui lòng thử lại sau ${minutesLeft} phút hoặc nhờ GVCN đặt lại mật khẩu.`,
+      });
+      return;
+    }
+
+    const nicknameId = nicknameToDocIdServer(normalized);
+    const dirDoc = await fetchOfficerDirectoryDocRest(nicknameId);
+
+    // Không tự kết luận sai mật khẩu nếu tài khoản chưa được GVCN tạo trên Firestore!
+    if (!dirDoc.exists) {
+      res.status(404).json({
+        code: 'ACCOUNT_NOT_FOUND',
+        error: `Tài khoản cán bộ lớp "${normalized}" chưa được tạo trên hệ thống. Vui lòng nhờ GVCN đăng nhập Google vào mục "Hệ thống → Phân quyền 8 vị trí → Quản lý tài khoản Cán bộ lớp" để cấp tài khoản chính thức.`,
+      });
+      return;
+    }
+
+    if (!dirDoc.active || !dirDoc.authEmail) {
+      res.status(403).json({
+        code: 'ACCOUNT_LOCKED',
+        error: `Tài khoản cán bộ lớp "${normalized}" hiện đang bị khóa hoặc đã được GVCN thu hồi quyền.`,
+      });
+      return;
+    }
+
+    // Xác thực mật khẩu trực tiếp qua Firebase Authentication
+    const verifyResp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: dirDoc.authEmail,
+          password,
+          returnSecureToken: true,
+        }),
+      }
+    );
+
+    const verifyJson = (await verifyResp.json().catch(() => ({}))) as {
+      localId?: string;
+      error?: { message?: string };
+    };
+
+    if (!verifyResp.ok || !verifyJson.localId) {
+      const errCode = String(verifyJson?.error?.message || '');
+      if (errCode.includes('PASSWORD_LOGIN_DISABLED') || errCode.includes('OPERATION_NOT_ALLOWED')) {
+        res.status(503).json({
+          code: 'PASSWORD_LOGIN_DISABLED',
+          error:
+            'Phương thức đăng nhập Email/Password hiện đang tắt trên Firebase Authentication của dự án. Vui lòng báo GVCN bật Email/Password trong Firebase Console → Authentication → Sign-in method.',
+        });
+        return;
+      }
+
+      if (errCode.includes('USER_DISABLED')) {
+        res.status(403).json({
+          code: 'ACCOUNT_LOCKED',
+          error: `Tài khoản "${normalized}" đã bị vô hiệu hóa trên Firebase Authentication.`,
+        });
+        return;
+      }
+
+      const prevCount = rateState && rateState.lockedUntilMs <= now ? rateState.count : 0;
+      const nextCount = prevCount + 1;
+      if (nextCount >= OFFICER_RATE_LIMIT_MAX_ATTEMPTS) {
+        officerFailedLoginMap.set(rateKey, {
+          count: nextCount,
+          lockedUntilMs: now + OFFICER_RATE_LIMIT_WINDOW_MS,
+        });
+        res.status(429).json({
+          code: 'RATE_LIMITED',
+          error: `Bạn đã nhập sai mật khẩu ${OFFICER_RATE_LIMIT_MAX_ATTEMPTS} lần liên tiếp. Tài khoản tạm khóa đăng nhập 15 phút để bảo mật.`,
+        });
+        return;
+      }
+
+      officerFailedLoginMap.set(rateKey, { count: nextCount, lockedUntilMs: 0 });
+      const remaining = OFFICER_RATE_LIMIT_MAX_ATTEMPTS - nextCount;
+      res.status(401).json({
+        code: 'INVALID_PASSWORD',
+        error: `Mật khẩu của tài khoản "${normalized}" chưa chính xác (còn ${remaining} lần thử). Nếu quên mật khẩu, hãy nhờ GVCN đặt lại.`,
+      });
+      return;
+    }
+
+    officerFailedLoginMap.delete(rateKey);
+    res.json({
+      ok: true,
+      nickname: dirDoc.nickname,
+      authEmail: dirDoc.authEmail,
+      officerUid: verifyJson.localId,
+    });
+  } catch (error) {
+    console.error('Officer login route error:', error);
+    res.status(500).json({
+      code: 'LOGIN_ERROR',
+      error: error instanceof Error ? error.message : 'Lỗi máy chủ khi xác thực Cán bộ lớp.',
+    });
+  }
+});
+
+// ============================================================================
 // SERVER-SIDE GEMINI API ROUTES (GVCN 360 AI PRO — Strictly Protected)
 // ============================================================================
 app.post('/api/gemini/analyze', requireApprovedTeacher, async (req: AuthenticatedRequest, res) => {
