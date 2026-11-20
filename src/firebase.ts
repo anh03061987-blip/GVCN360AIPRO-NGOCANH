@@ -217,26 +217,115 @@ export interface OfficerAuthHealthStatus {
   consoleProvidersUrl: string;
 }
 
+const CLIENT_RATE_LIMIT_MAX = 5;
+const CLIENT_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+
+function getClientRateLimitKey(normalizedNickname: string): string {
+  return `gvcn360_officer_rl_${normalizedNickname}`;
+}
+
+function readClientRateLimit(normalizedNickname: string): { count: number; lockedUntilMs: number } {
+  try {
+    const raw = window.sessionStorage.getItem(getClientRateLimitKey(normalizedNickname));
+    if (!raw) return { count: 0, lockedUntilMs: 0 };
+    const parsed = JSON.parse(raw) as { count?: number; lockedUntilMs?: number };
+    return {
+      count: Number(parsed.count) || 0,
+      lockedUntilMs: Number(parsed.lockedUntilMs) || 0,
+    };
+  } catch {
+    return { count: 0, lockedUntilMs: 0 };
+  }
+}
+
+function writeClientRateLimit(
+  normalizedNickname: string,
+  state: { count: number; lockedUntilMs: number } | null
+): void {
+  try {
+    const key = getClientRateLimitKey(normalizedNickname);
+    if (!state) {
+      window.sessionStorage.removeItem(key);
+    } else {
+      window.sessionStorage.setItem(key, JSON.stringify(state));
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+function isJsonResponse(resp: Response): boolean {
+  const ct = (resp.headers.get('content-type') || '').toLowerCase();
+  return ct.includes('application/json');
+}
+
+async function probeEmailPasswordDirect(): Promise<OfficerAuthHealthStatus> {
+  const consoleProvidersUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`;
+  try {
+    const probeResp = await fetch(
+      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: `healthcheck_${Date.now()}@${OFFICER_AUTH_DOMAIN}`,
+          password: 'DiagnosticProbePassword99!',
+          returnSecureToken: true,
+        }),
+      }
+    );
+    const probeJson = (await probeResp.json().catch(() => ({}))) as {
+      error?: { message?: string };
+    };
+    const errMsg = String(probeJson?.error?.message || '');
+    const emailPasswordEnabled =
+      !errMsg.includes('PASSWORD_LOGIN_DISABLED') && !errMsg.includes('OPERATION_NOT_ALLOWED');
+    return {
+      emailPasswordEnabled,
+      rawStatus: emailPasswordEnabled ? 'ENABLED' : errMsg || 'PASSWORD_LOGIN_DISABLED',
+      projectId: firebaseConfig.projectId,
+      consoleProvidersUrl,
+    };
+  } catch {
+    return {
+      emailPasswordEnabled: false,
+      rawStatus: 'CHECK_ERROR',
+      projectId: firebaseConfig.projectId,
+      consoleProvidersUrl,
+    };
+  }
+}
+
 export async function checkOfficerAuthHealth(): Promise<OfficerAuthHealthStatus> {
-  const headers = await getAuthBearerHeaders();
-  const resp = await fetch('/api/officer/auth-health', {
-    method: 'GET',
-    headers,
-  });
-  const data = (await resp.json().catch(() => ({}))) as Partial<OfficerAuthHealthStatus>;
-  return {
-    emailPasswordEnabled: data.emailPasswordEnabled === true,
-    rawStatus: data.rawStatus || (resp.ok ? 'UNKNOWN' : `HTTP_${resp.status}`),
-    projectId: data.projectId || firebaseConfig.projectId,
-    consoleProvidersUrl:
-      data.consoleProvidersUrl ||
-      `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`,
-  };
+  try {
+    const headers = await getAuthBearerHeaders();
+    const resp = await fetch('/api/officer/auth-health', {
+      method: 'GET',
+      headers,
+    });
+    if (isJsonResponse(resp)) {
+      const data = (await resp.json().catch(() => ({}))) as Partial<OfficerAuthHealthStatus>;
+      if (typeof data.emailPasswordEnabled === 'boolean') {
+        return {
+          emailPasswordEnabled: data.emailPasswordEnabled,
+          rawStatus: data.rawStatus || (resp.ok ? 'ENABLED' : `HTTP_${resp.status}`),
+          projectId: data.projectId || firebaseConfig.projectId,
+          consoleProvidersUrl:
+            data.consoleProvidersUrl ||
+            `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/providers`,
+        };
+      }
+    }
+  } catch {
+    // Fallback below when static hosting does not expose /api/officer/auth-health
+  }
+  return probeEmailPasswordDirect();
 }
 
 /**
- * Tạo tài khoản Firebase Auth thật cho Cán bộ lớp thông qua backend được bảo vệ (/api/officer/provision)
- * để phiên đăng nhập Google hiện tại của GVCN không bao giờ bị ảnh hưởng.
+ * Tạo tài khoản Firebase Auth thật cho Cán bộ lớp thông qua backend được bảo vệ (/api/officer/provision).
+ * Nếu ứng dụng chạy trên bản triển khai tĩnh không định tuyến /api/officer/provision (non-JSON 404),
+ * tự động gọi Firebase Identity Toolkit REST (accounts:signUp) — vẫn tuyệt đối không ảnh hưởng phiên Google của GVCN.
  */
 export async function provisionOfficerAuthCredential(
   nickname: string,
@@ -247,36 +336,102 @@ export async function provisionOfficerAuthCredential(
     throw new Error('Mật khẩu cán bộ lớp phải có ít nhất 8 ký tự.');
   }
 
-  const headers = await getAuthBearerHeaders();
-  const resp = await fetch('/api/officer/provision', {
-    method: 'POST',
-    headers,
-    body: JSON.stringify({
-      nickname,
-      password,
-      mode: options?.mode || 'create',
-      credentialVersion: options?.credentialVersion || 1,
-    }),
-  });
+  const normalized = normalizeOfficerNickname(nickname);
+  const nicknameId = nicknameToDocId(normalized);
+  const version = Math.max(1, Math.min(100, Math.floor(Number(options?.credentialVersion) || 1)));
 
-  const data = (await resp.json().catch(() => ({}))) as {
-    ok?: boolean;
-    officerUid?: string;
-    authEmail?: string;
-    nickname?: string;
-    nicknameId?: string;
-    error?: string;
+  let shouldFallbackToRest = false;
+
+  try {
+    const headers = await getAuthBearerHeaders();
+    const resp = await fetch('/api/officer/provision', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        nickname: normalized,
+        password,
+        mode: options?.mode || 'create',
+        credentialVersion: version,
+      }),
+    });
+
+    if (isJsonResponse(resp)) {
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        officerUid?: string;
+        authEmail?: string;
+        nickname?: string;
+        nicknameId?: string;
+        error?: string;
+      };
+
+      if (!resp.ok || !data.ok || !data.officerUid || !data.authEmail) {
+        throw new Error(data.error || `Không thể tạo tài khoản cán bộ lớp (HTTP ${resp.status}).`);
+      }
+
+      return {
+        officerUid: data.officerUid,
+        authEmail: data.authEmail,
+        nickname: data.nickname || normalized,
+        nicknameId: data.nicknameId || nicknameId,
+      };
+    }
+
+    if (resp.status === 404 || resp.status === 405 || resp.status === 502 || resp.status === 503) {
+      shouldFallbackToRest = true;
+    } else {
+      throw new Error(`Không thể tạo tài khoản cán bộ lớp (HTTP ${resp.status}).`);
+    }
+  } catch (err) {
+    if (err instanceof TypeError) {
+      shouldFallbackToRest = true;
+    } else if (!shouldFallbackToRest) {
+      throw err;
+    }
+  }
+
+  // Fallback REST thuần tới Firebase Identity Toolkit (không dùng createUserWithEmailAndPassword của SDK nên không đụng phiên Google của GVCN)
+  const authEmail = buildOfficerAuthEmail(nicknameId, version);
+  const signUpResp = await fetch(
+    `https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(firebaseConfig.apiKey)}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        email: authEmail,
+        password,
+        returnSecureToken: true,
+      }),
+    }
+  );
+  const signUpJson = (await signUpResp.json().catch(() => ({}))) as {
+    localId?: string;
+    error?: { message?: string };
   };
 
-  if (!resp.ok || !data.ok || !data.officerUid || !data.authEmail) {
-    throw new Error(data.error || `Không thể tạo tài khoản cán bộ lớp (HTTP ${resp.status}).`);
+  if (!signUpResp.ok || !signUpJson.localId) {
+    const errCode = String(signUpJson?.error?.message || '');
+    if (errCode.includes('OPERATION_NOT_ALLOWED') || errCode.includes('PASSWORD_LOGIN_DISABLED')) {
+      throw new Error(
+        'Phương thức đăng nhập Email/Password chưa được bật trên Firebase Console. Vui lòng vào Firebase Console → Authentication → Sign-in method → bật Email/Password rồi bấm Save.'
+      );
+    }
+    if (errCode.includes('EMAIL_EXISTS')) {
+      throw new Error(
+        `Định danh xác thực cho "${normalized}" (v${version}) đã tồn tại trên Firebase Auth. Hãy tăng phiên bản hoặc chọn nickname khác.`
+      );
+    }
+    if (errCode.includes('WEAK_PASSWORD')) {
+      throw new Error('Mật khẩu chưa đủ mạnh theo tiêu chuẩn Firebase Authentication (tối thiểu 8 ký tự).');
+    }
+    throw new Error(`Không thể tạo tài khoản Firebase Auth (${errCode || `HTTP ${signUpResp.status}`}).`);
   }
 
   return {
-    officerUid: data.officerUid,
-    authEmail: data.authEmail,
-    nickname: data.nickname || normalizeOfficerNickname(nickname),
-    nicknameId: data.nicknameId || nicknameToDocId(nickname),
+    officerUid: signUpJson.localId,
+    authEmail,
+    nickname: normalized,
+    nicknameId,
   };
 }
 
@@ -289,27 +444,114 @@ export async function signInOfficerWithNickname(nicknameRaw: string, password: s
     throw new Error('Vui lòng nhập mật khẩu.');
   }
 
-  const resp = await fetch('/api/officer/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ nickname: normalized, password }),
-  });
+  let resolvedAuthEmail: string | null = null;
+  let shouldFallbackDirect = false;
 
-  const data = (await resp.json().catch(() => ({}))) as {
-    ok?: boolean;
-    authEmail?: string;
-    error?: string;
-  };
+  // 1. Ưu tiên xác thực qua backend /api/officer/login (có chống brute-force phía máy chủ)
+  try {
+    const resp = await fetch('/api/officer/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nickname: normalized, password }),
+    });
 
-  if (!resp.ok || !data.ok || !data.authEmail) {
-    throw new Error(
-      data.error || `Không thể xác thực tài khoản cán bộ lớp "${normalized}" (HTTP ${resp.status}).`
-    );
+    if (isJsonResponse(resp)) {
+      const data = (await resp.json().catch(() => ({}))) as {
+        ok?: boolean;
+        authEmail?: string;
+        code?: string;
+        error?: string;
+      };
+
+      if (resp.ok && data.ok && data.authEmail) {
+        resolvedAuthEmail = data.authEmail;
+      } else if (data.error || data.code) {
+        throw new Error(
+          data.error || `Không thể xác thực tài khoản cán bộ lớp "${normalized}" (HTTP ${resp.status}).`
+        );
+      } else {
+        shouldFallbackDirect = true;
+      }
+    } else if (
+      resp.status === 404 ||
+      resp.status === 405 ||
+      resp.status === 502 ||
+      resp.status === 503
+    ) {
+      // Môi trường triển khai tĩnh / bản chia sẻ không định tuyến Express POST /api/officer/login
+      shouldFallbackDirect = true;
+    } else {
+      throw new Error(`Không thể xác thực tài khoản cán bộ lớp "${normalized}" (HTTP ${resp.status}).`);
+    }
+  } catch (err) {
+    if (err instanceof TypeError) {
+      shouldFallbackDirect = true;
+    } else if (!shouldFallbackDirect) {
+      throw err;
+    }
+  }
+
+  // 2. Fallback an toàn: tra cứu trực tiếp 1 bản ghi officer_directory/{nicknameId} trên Firestore + xác thực thật bằng Firebase Auth
+  if (shouldFallbackDirect || !resolvedAuthEmail) {
+    const now = Date.now();
+    const rateState = readClientRateLimit(normalized);
+    if (rateState.lockedUntilMs > now) {
+      const minutesLeft = Math.max(1, Math.ceil((rateState.lockedUntilMs - now) / 60000));
+      throw new Error(
+        `Bạn đã nhập sai mật khẩu quá ${CLIENT_RATE_LIMIT_MAX} lần. Vui lòng thử lại sau ${minutesLeft} phút hoặc nhờ GVCN đặt lại mật khẩu.`
+      );
+    }
+
+    const nicknameId = nicknameToDocId(normalized);
+    const dirSnap = await getDocFromServer(doc(db, 'officer_directory', nicknameId));
+    if (!dirSnap.exists()) {
+      throw new Error(
+        `Tài khoản cán bộ lớp "${normalized}" chưa được tạo trên hệ thống. Vui lòng nhờ GVCN đăng nhập Google vào mục "Hệ thống → Phân quyền 8 vị trí → Quản lý tài khoản Cán bộ lớp" để cấp tài khoản chính thức.`
+      );
+    }
+
+    const dirData = dirSnap.data() as { active?: boolean; authEmail?: string };
+    if (dirData.active !== true || !dirData.authEmail) {
+      throw new Error(
+        `Tài khoản cán bộ lớp "${normalized}" hiện đang bị khóa hoặc đã được GVCN thu hồi quyền.`
+      );
+    }
+
+    resolvedAuthEmail = dirData.authEmail;
   }
 
   try {
-    return await signInWithEmailAndPassword(auth, data.authEmail, password);
+    const cred = await signInWithEmailAndPassword(auth, resolvedAuthEmail, password);
+    writeClientRateLimit(normalized, null);
+    return cred;
   } catch (err) {
+    const code =
+      typeof err === 'object' && err !== null && 'code' in err
+        ? String((err as { code?: unknown }).code || '')
+        : '';
+    if (
+      code === 'auth/invalid-credential' ||
+      code === 'auth/wrong-password' ||
+      code === 'auth/user-not-found'
+    ) {
+      const now = Date.now();
+      const prev = readClientRateLimit(normalized);
+      const nextCount = (prev.lockedUntilMs <= now ? prev.count : 0) + 1;
+      if (nextCount >= CLIENT_RATE_LIMIT_MAX) {
+        writeClientRateLimit(normalized, {
+          count: nextCount,
+          lockedUntilMs: now + CLIENT_RATE_LIMIT_WINDOW_MS,
+        });
+        throw new Error(
+          `Bạn đã nhập sai mật khẩu ${CLIENT_RATE_LIMIT_MAX} lần liên tiếp. Tài khoản tạm khóa đăng nhập 15 phút để bảo mật.`
+        );
+      }
+      writeClientRateLimit(normalized, { count: nextCount, lockedUntilMs: 0 });
+      const remaining = CLIENT_RATE_LIMIT_MAX - nextCount;
+      throw new Error(
+        `Mật khẩu của tài khoản "${normalized}" chưa chính xác (còn ${remaining} lần thử). Nếu quên mật khẩu, hãy nhờ GVCN đặt lại.`
+      );
+    }
     throw new Error(mapFirebaseAuthError(err));
   }
 }
