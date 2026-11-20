@@ -189,7 +189,7 @@ service cloud.firestore {
         (!('weekLabel' in data) || (data.weekLabel is string && data.weekLabel.size() <= 40)) &&
         (!('amount' in data) || data.amount is number) &&
         data.date is string && data.date.size() <= 30 &&
-        data.description is string && data.description.size() <= 1000 &&
+        data.description is string && data.description.size() <= 2000 &&
         data.submittedByRole is string && data.submittedByRole.size() <= 40 &&
         data.submittedByTitle is string && data.submittedByTitle.size() <= 100 &&
         data.submittedByUid is string && data.submittedByUid.size() > 0 && data.submittedByUid.size() <= 128 &&
@@ -748,16 +748,34 @@ service cloud.firestore {
               isOwner(userId) ||
               officerCanCreateTicketType(userId, workspaceId, incoming().type, incoming().submittedByRole)
             );
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(ticketId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(ticketId) &&
             isValidTicket(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().submittedByUid == existing().submittedByUid &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
-            (!(existing().status in ['approved', 'rejected']) || isAdmin()) &&
             (
-              isAdmin() ||
-              incoming().diff(existing()).affectedKeys().hasOnly(['status', 'version', 'approvalId', 'batchApprovalId', 'reviewedByTeacher', 'reviewedByUid', 'reviewedAtMs', 'updatedAt'])
+              (
+                (isOwner(userId) || isAdmin()) &&
+                (!(existing().status in ['approved', 'rejected']) || isAdmin()) &&
+                (
+                  isAdmin() ||
+                  incoming().diff(existing()).affectedKeys().hasOnly(['status', 'version', 'approvalId', 'batchApprovalId', 'reviewedByTeacher', 'reviewedByUid', 'reviewedAtMs', 'updatedAt'])
+                )
+              ) ||
+              (
+                isWorkspaceOfficer(userId, workspaceId) &&
+                existing().submittedByUid == request.auth.uid &&
+                existing().status == 'needs_revision' &&
+                incoming().status == 'pending' &&
+                incoming().version == existing().version + 1 &&
+                incoming().type == existing().type &&
+                incoming().typeLabel == existing().typeLabel &&
+                incoming().submittedByRole == existing().submittedByRole &&
+                incoming().submittedByTitle == existing().submittedByTitle &&
+                incoming().createdAtMs == existing().createdAtMs &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['category', 'date', 'description', 'status', 'version', 'updatedAt'])
+              )
             );
         }
 

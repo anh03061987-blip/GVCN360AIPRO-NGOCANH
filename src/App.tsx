@@ -47,6 +47,7 @@ import {
   KeyRound,
   FileText,
   Send,
+  UserCircle,
 } from 'lucide-react';
 import {
   auth,
@@ -146,6 +147,7 @@ import {
   MonitorAttendanceTab,
   MonitorClassReportTab,
   MonitorSentTicketsTab,
+  MonitorAccountTab,
 } from './components/tabs/MonitorWorkspaceTabs';
 import {
   buildParsedStudentRows,
@@ -245,17 +247,19 @@ export default function App() {
 
     const allowed = new Set<string>();
     if (hasMonitor) {
-      // Không gian làm việc riêng của Lớp trưởng: đúng 4 menu gọn gàng
+      // Không gian làm việc riêng của Lớp trưởng: đúng 5 menu được phép
       allowed.add('monitor_overview');
       allowed.add('monitor_attendance');
       allowed.add('monitor_report');
       allowed.add('monitor_tickets');
+      allowed.add('monitor_account');
     } else {
       allowed.add('tickets');
     }
 
     if (hasTeamLeader) {
       allowed.add('students');
+      allowed.add('attendance');
       allowed.add('emulation_standards');
       allowed.add('tickets');
     }
@@ -2598,6 +2602,37 @@ export default function App() {
       updatedAt: serverTimestamp(),
     });
     showToast('Đã gửi báo cáo tình hình lớp vào Trung tâm kiểm duyệt của GVCN!');
+  };
+
+  // Cán bộ lớp chỉnh sửa & gửi lại phiếu đang ở trạng thái GVCN yêu cầu sửa (needs_revision -> pending)
+  const handleResubmitRevisedTicket = async (
+    ticket: TicketRecord,
+    updates: { category: string; date: string; description: string }
+  ) => {
+    if (!user || sessionKind !== 'officer' || !officerMembership?.active) {
+      throw new Error('Phiên đăng nhập Cán bộ lớp không hợp lệ.');
+    }
+    if (ticket.submittedByUid !== user.uid || ticket.status !== 'needs_revision') {
+      throw new Error('Chỉ được chỉnh sửa phiếu do chính bạn gửi khi GVCN yêu cầu bổ sung.');
+    }
+    const ticketRef = doc(
+      db,
+      'users',
+      officerMembership.teacherUid,
+      'workspaces',
+      officerMembership.workspaceId,
+      'tickets',
+      ticket.id
+    );
+    await updateDoc(ticketRef, {
+      category: updates.category.slice(0, 150),
+      date: updates.date.slice(0, 30),
+      description: updates.description.slice(0, 2000),
+      status: 'pending',
+      version: (Number(ticket.version) || 1) + 1,
+      updatedAt: serverTimestamp(),
+    });
+    showToast('Đã cập nhật nội dung bổ sung và gửi lại phiếu cho GVCN duyệt!');
   };
 
   const bulkImportAnalysis = useMemo(
@@ -5177,11 +5212,12 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
     count?: number;
     badge?: number;
   }[] = [
-    // Không gian làm việc riêng cho Lớp trưởng (chỉ hiển thị với tài khoản Lớp trưởng thật)
+    // Không gian làm việc riêng cho Lớp trưởng (đúng 5 menu khi chỉ giữ vai trò Lớp trưởng)
     { id: 'monitor_overview', label: 'Tổng quan lớp trưởng', icon: LayoutDashboard, group: 'Không gian Lớp trưởng' },
     { id: 'monitor_attendance', label: 'Theo dõi chuyên cần', icon: ClipboardCheck, group: 'Không gian Lớp trưởng' },
     { id: 'monitor_report', label: 'Báo cáo tình hình lớp', icon: FileText, group: 'Không gian Lớp trưởng' },
     { id: 'monitor_tickets', label: 'Phiếu đã gửi', icon: Send, group: 'Không gian Lớp trưởng' },
+    { id: 'monitor_account', label: 'Tài khoản', icon: UserCircle, group: 'Không gian Lớp trưởng' },
     { id: 'dashboard', label: 'Dashboard điều hành', icon: LayoutDashboard, group: 'Quán xuyến lớp học' },
     { id: 'students', label: 'Hồ sơ học sinh', icon: Users, count: stats.totalStudents, group: 'Quán xuyến lớp học' },
     { id: 'attendance', label: 'Điểm danh hằng ngày', icon: ClipboardCheck, group: 'Quán xuyến lớp học' },
@@ -5554,7 +5590,20 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
           )}
 
           {isRealMonitor && officerMembership && activeTab === 'monitor_tickets' && (
-            <MonitorSentTicketsTab currentUserUid={user.uid} tickets={tickets} />
+            <MonitorSentTicketsTab
+              currentUserUid={user.uid}
+              tickets={tickets}
+              onResubmitRevisedTicket={handleResubmitRevisedTicket}
+            />
+          )}
+
+          {isRealMonitor && officerMembership && activeTab === 'monitor_account' && (
+            <MonitorAccountTab
+              classConfig={classConfig}
+              membership={officerMembership}
+              onOpenChangePassword={() => setShowOfficerChangePasswordModal(true)}
+              onSignOut={() => void signOutUser()}
+            />
           )}
 
           {!isRealOfficer && activeTab === 'dashboard' && (

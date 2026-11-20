@@ -103,7 +103,7 @@
         "weekLabel": { "type": "string", "maxLength": 40 },
         "amount": { "type": "number" },
         "date": { "type": "string", "maxLength": 30 },
-        "description": { "type": "string", "maxLength": 1000 },
+        "description": { "type": "string", "maxLength": 2000 },
         "submittedByRole": { "type": "string", "maxLength": 40 },
         "submittedByTitle": { "type": "string", "maxLength": 100 },
         "submittedByUid": { "type": "string", "maxLength": 128 },

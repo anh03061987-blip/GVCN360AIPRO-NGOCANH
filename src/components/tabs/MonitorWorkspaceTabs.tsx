@@ -13,7 +13,13 @@ import {
   Eye,
   XCircle,
   RefreshCw,
+  Edit3,
+  KeyRound,
+  LogOut,
+  ShieldCheck,
+  UserCircle,
 } from 'lucide-react';
+import { ROLES } from '../../constants/gvcnConstants';
 import type {
   AttendanceRecord,
   ClassConfig,
@@ -1008,24 +1014,64 @@ export function MonitorClassReportTab({
 }
 
 // ============================================================================
-// 4. PHIẾU ĐÃ GỬI (LỚP TRƯỞNG)
+// 4. PHIẾU ĐÃ GỬI (LỚP TRƯỞNG) — Hỗ trợ sửa và gửi lại phiếu bị GVCN yêu cầu bổ sung
 // ============================================================================
 interface MonitorSentTicketsTabProps {
   currentUserUid: string;
   tickets: TicketRecord[];
+  onResubmitRevisedTicket: (
+    ticket: TicketRecord,
+    updates: { category: string; date: string; description: string }
+  ) => Promise<void>;
 }
 
 export function MonitorSentTicketsTab({
   currentUserUid,
   tickets,
+  onResubmitRevisedTicket,
 }: MonitorSentTicketsTabProps) {
   const [statusFilter, setStatusFilter] = useState<'all' | TicketRecord['status']>('all');
+  const [editingTicketId, setEditingTicketId] = useState<string | null>(null);
+  const [editCategory, setEditCategory] = useState('');
+  const [editDate, setEditDate] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [isSavingRevision, setIsSavingRevision] = useState(false);
+  const [revisionError, setRevisionError] = useState('');
 
   const myTickets = useMemo(() => {
     const own = tickets.filter((t) => t.submittedByUid === currentUserUid);
     if (statusFilter === 'all') return own;
     return own.filter((t) => t.status === statusFilter);
   }, [tickets, currentUserUid, statusFilter]);
+
+  const startEditingRevision = (t: TicketRecord) => {
+    setEditingTicketId(t.id);
+    setEditCategory(t.category || '');
+    setEditDate(t.date || getTodayIso());
+    setEditDescription(t.description || '');
+    setRevisionError('');
+  };
+
+  const handleSaveRevision = async (t: TicketRecord) => {
+    setRevisionError('');
+    if (!editDescription.trim()) {
+      setRevisionError('Vui lòng nhập nội dung báo cáo đã bổ sung trước khi gửi lại GVCN.');
+      return;
+    }
+    setIsSavingRevision(true);
+    try {
+      await onResubmitRevisedTicket(t, {
+        category: editCategory.trim() || t.category,
+        date: editDate || t.date,
+        description: editDescription.trim(),
+      });
+      setEditingTicketId(null);
+    } catch (err) {
+      setRevisionError(err instanceof Error ? err.message : 'Không thể gửi lại phiếu đã sửa.');
+    } finally {
+      setIsSavingRevision(false);
+    }
+  };
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4">
@@ -1036,7 +1082,7 @@ export function MonitorSentTicketsTab({
             <span>Phiếu Lớp trưởng đã gửi GVCN</span>
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Theo dõi trạng thái phê duyệt từ GVCN đối với các báo cáo chuyên cần và báo cáo tình hình lớp bạn đã gửi.
+            Theo dõi trạng thái phê duyệt từ GVCN. Với phiếu ở trạng thái <strong>GVCN yêu cầu sửa</strong>, bạn có thể chỉnh sửa và gửi lại để GVCN duyệt.
           </p>
         </div>
 
@@ -1074,10 +1120,11 @@ export function MonitorSentTicketsTab({
         <div className="space-y-3">
           {myTickets.map((t) => {
             const st = formatTicketStatus(t.status);
+            const isEditing = editingTicketId === t.id;
             return (
               <div
                 key={t.id}
-                className="p-4 rounded-2xl border border-slate-200 hover:border-teal-200 transition-all space-y-2"
+                className="p-4 rounded-2xl border border-slate-200 hover:border-teal-200 transition-all space-y-2.5"
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex items-center gap-2 flex-wrap">
@@ -1090,25 +1137,99 @@ export function MonitorSentTicketsTab({
                       <span className="text-xs text-slate-400">• {t.weekLabel}</span>
                     )}
                   </div>
-                  <span
-                    className={`px-2.5 py-1 rounded-lg text-xs font-bold border inline-flex items-center gap-1 ${st.badgeClass}`}
-                  >
-                    {t.status === 'approved' ? (
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                    ) : t.status === 'rejected' ? (
-                      <XCircle className="w-3.5 h-3.5" />
-                    ) : t.status === 'needs_revision' ? (
-                      <RefreshCw className="w-3.5 h-3.5" />
-                    ) : (
-                      <Clock className="w-3.5 h-3.5" />
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold border inline-flex items-center gap-1 ${st.badgeClass}`}
+                    >
+                      {t.status === 'approved' ? (
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                      ) : t.status === 'rejected' ? (
+                        <XCircle className="w-3.5 h-3.5" />
+                      ) : t.status === 'needs_revision' ? (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      ) : (
+                        <Clock className="w-3.5 h-3.5" />
+                      )}
+                      <span>{st.label}</span>
+                    </span>
+                    {t.status === 'needs_revision' && !isEditing && (
+                      <button
+                        type="button"
+                        onClick={() => startEditingRevision(t)}
+                        className="px-3 py-1 rounded-lg bg-[#0C9BA6] hover:bg-teal-700 text-white text-xs font-bold inline-flex items-center gap-1"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />
+                        <span>Sửa & gửi lại</span>
+                      </button>
                     )}
-                    <span>{st.label}</span>
-                  </span>
+                  </div>
                 </div>
 
-                <p className="text-xs sm:text-sm text-slate-700 whitespace-pre-line leading-relaxed">
-                  {t.description}
-                </p>
+                {isEditing ? (
+                  <div className="p-3.5 rounded-xl bg-amber-50/70 border border-amber-200 space-y-3">
+                    <div className="text-xs font-bold text-amber-900">
+                      Chỉnh sửa phiếu theo yêu cầu bổ sung của GVCN (sau khi gửi lại, phiếu sẽ về trạng thái Chờ GVCN duyệt)
+                    </div>
+                    {revisionError && (
+                      <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800">
+                        {revisionError}
+                      </div>
+                    )}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">Tiêu đề / Hạng mục</label>
+                        <input
+                          type="text"
+                          value={editCategory}
+                          onChange={(e) => setEditCategory(e.target.value)}
+                          maxLength={140}
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">Ngày báo cáo</label>
+                        <input
+                          type="date"
+                          value={editDate}
+                          onChange={(e) => setEditDate(e.target.value)}
+                          className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-700 mb-1">Nội dung đã bổ sung *</label>
+                      <textarea
+                        rows={4}
+                        value={editDescription}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        maxLength={1950}
+                        className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-xs sm:text-sm"
+                      />
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditingTicketId(null)}
+                        className="px-3 py-1.5 rounded-xl bg-white border border-slate-300 text-slate-700 text-xs font-bold"
+                      >
+                        Hủy
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSavingRevision}
+                        onClick={() => void handleSaveRevision(t)}
+                        className="px-4 py-1.5 rounded-xl bg-[#102744] hover:bg-slate-800 disabled:opacity-50 text-white text-xs font-bold inline-flex items-center gap-1.5"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        <span>{isSavingRevision ? 'Đang gửi lại...' : 'Gửi lại cho GVCN duyệt'}</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs sm:text-sm text-slate-700 whitespace-pre-line leading-relaxed">
+                    {t.description}
+                  </p>
+                )}
 
                 {t.reviewedByTeacher && (
                   <div className="text-[11px] text-slate-500 pt-1 border-t border-slate-100">
@@ -1120,6 +1241,114 @@ export function MonitorSentTicketsTab({
           })}
         </div>
       )}
+    </div>
+  );
+}
+
+// ============================================================================
+// 5. TÀI KHOẢN (LỚP TRƯỞNG)
+// ============================================================================
+interface MonitorAccountTabProps {
+  classConfig: ClassConfig;
+  membership: OfficerMembershipRecord;
+  onOpenChangePassword: () => void;
+  onSignOut: () => void;
+}
+
+export function MonitorAccountTab({
+  classConfig,
+  membership,
+  onOpenChangePassword,
+  onSignOut,
+}: MonitorAccountTabProps) {
+  const roleTitles = (membership.roles || []).map(
+    (r) => ROLES.find((def) => def.id === r)?.title || r
+  );
+
+  return (
+    <div className="max-w-3xl space-y-6">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+        <div className="px-6 py-5 bg-gradient-to-r from-[#0f172a] via-[#102744] to-[#0C9BA6] text-white flex items-center gap-4">
+          <div className="w-14 h-14 rounded-2xl bg-white/15 border border-white/25 flex items-center justify-center shrink-0">
+            <UserCircle className="w-8 h-8 text-teal-200" />
+          </div>
+          <div>
+            <h2 className="text-lg font-extrabold">{membership.studentName}</h2>
+            <p className="text-xs text-teal-100 mt-0.5">
+              Nickname đăng nhập: <code className="font-mono font-bold bg-white/15 px-2 py-0.5 rounded">{membership.nickname}</code>
+            </p>
+          </div>
+        </div>
+
+        <div className="p-6 space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+              <div className="text-xs text-slate-500">Trường & Lớp phụ trách</div>
+              <div className="font-bold text-[#102744] mt-0.5">
+                Lớp {classConfig.className} — {classConfig.schoolName}
+              </div>
+              <div className="text-xs text-slate-500 mt-0.5">Năm học {classConfig.schoolYear}</div>
+            </div>
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+              <div className="text-xs text-slate-500">Giáo viên chủ nhiệm</div>
+              <div className="font-bold text-[#102744] mt-0.5">{classConfig.teacherName}</div>
+              <div className="text-xs text-slate-500 mt-0.5">Mã học sinh: {membership.studentCode}</div>
+            </div>
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+              <div className="text-xs text-slate-500">Chức vụ được GVCN cấp</div>
+              <div className="flex flex-wrap gap-1.5 mt-1.5">
+                {roleTitles.map((title) => (
+                  <span
+                    key={title}
+                    className="px-2.5 py-1 rounded-lg bg-[#102744] text-white text-xs font-bold"
+                  >
+                    {title}
+                  </span>
+                ))}
+              </div>
+            </div>
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200/80">
+              <div className="text-xs text-slate-500">Phạm vi chuyên cần</div>
+              <div className="font-bold text-[#102744] mt-0.5 text-xs sm:text-sm">
+                {membership.allowDirectClassAttendance
+                  ? 'Tổng hợp 4 tổ + Điểm danh trực tiếp toàn lớp (GVCN đã bật)'
+                  : 'Tổng hợp báo cáo chuyên cần từ 4 Tổ trưởng (mặc định)'}
+              </div>
+              {membership.lastLoginAtMs && (
+                <div className="text-[11px] text-slate-500 mt-1">
+                  Đăng nhập gần nhất: {new Date(membership.lastLoginAtMs).toLocaleString('vi-VN')}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="p-3.5 rounded-xl bg-teal-50/70 border border-teal-200 text-xs text-teal-900 flex items-start gap-2.5">
+            <ShieldCheck className="w-4 h-4 text-[#0C9BA6] shrink-0 mt-0.5" />
+            <p className="leading-relaxed">
+              Tài khoản được xác thực thật qua Firebase Authentication và bảo vệ quyền hạn theo Firestore Security Rules. Mọi phiếu gửi lên đều cần GVCN kiểm duyệt trước khi cập nhật sổ chính thức.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-100">
+            <button
+              type="button"
+              onClick={onOpenChangePassword}
+              className="px-4 py-2.5 rounded-xl bg-[#0C9BA6] hover:bg-teal-700 text-white text-sm font-bold inline-flex items-center gap-2 shadow-xs"
+            >
+              <KeyRound className="w-4 h-4" />
+              <span>Đổi mật khẩu</span>
+            </button>
+            <button
+              type="button"
+              onClick={onSignOut}
+              className="px-4 py-2.5 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-sm font-bold inline-flex items-center gap-2"
+            >
+              <LogOut className="w-4 h-4" />
+              <span>Đăng xuất an toàn</span>
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
