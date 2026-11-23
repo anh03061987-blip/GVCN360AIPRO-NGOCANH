@@ -19,6 +19,10 @@ import {
   ClipboardCheck,
   Clock,
   CheckCircle2,
+  AlertTriangle,
+  Link2,
+  UserX,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { ROLES } from '../constants/gvcnConstants';
 import {
@@ -31,8 +35,22 @@ import type {
   OfficerAccountRecord,
   OfficerRoleId,
   PermissionAuditLogRecord,
+  RoleAssignmentHistoryRecord,
+  RoleAssignmentRecord,
   StudentRecord,
 } from '../types/gvcn';
+import {
+  compareStudentsByRosterOrder,
+  formatStudentRolesLabel,
+  getStudentMoetCode,
+  getStudentRoles,
+  isValidRosterOrder,
+} from '../utils/studentExcelImport';
+import {
+  analyzeOfficerPositionsAndAccounts,
+  type OfficerGovernanceSummary,
+  type OfficerLiveMembershipStatus,
+} from '../utils/officerReconciliation';
 
 const OFFICER_ROLES = ROLES.filter((r) => r.id !== 'gvcn') as Array<
   (typeof ROLES)[number] & { id: OfficerRoleId }
@@ -72,8 +90,12 @@ export interface OfficerManagementSectionProps {
   classConfig: ClassConfig;
   students: StudentRecord[];
   officerAccounts: OfficerAccountRecord[];
-  officerLoginStatusMap?: Record<string, { lastLoginAtMs?: number; mustChangePassword?: boolean }>;
+  roleAssignments?: RoleAssignmentRecord[];
+  roleAssignmentHistory?: RoleAssignmentHistoryRecord[];
+  governance?: OfficerGovernanceSummary;
+  officerLoginStatusMap?: Record<string, OfficerLiveMembershipStatus>;
   permissionAuditLogs: PermissionAuditLogRecord[];
+  onOpenReconciliationModal?: () => void;
   onCreateOfficerAccount: (payload: {
     student: StudentRecord;
     nickname: string;
@@ -88,6 +110,17 @@ export interface OfficerManagementSectionProps {
   ) => Promise<void>;
   onToggleMonitorDirectAttendance?: (account: OfficerAccountRecord) => Promise<void>;
   onToggleOfficerLock: (account: OfficerAccountRecord) => Promise<void>;
+  onLockOfficerWithReason?: (account: OfficerAccountRecord, reason: string) => Promise<void>;
+  onRelinkExistingOfficerAccount?: (
+    account: OfficerAccountRecord,
+    targetStudent: StudentRecord,
+    roles: OfficerRoleId[]
+  ) => Promise<void>;
+  onActivateOfficerPosition?: (payload: {
+    roleId: OfficerRoleId;
+    securityLockVerifiedByGvcn?: boolean;
+  }) => Promise<{ ok: boolean; message: string }>;
+  onRevokeOfficerPosition?: (account: OfficerAccountRecord, reason?: string) => Promise<void>;
   onResetOfficerPassword: (
     account: OfficerAccountRecord,
     newPassword: string,
@@ -101,16 +134,39 @@ export interface OfficerManagementSectionProps {
   onDeleteOfficerAccount: (account: OfficerAccountRecord) => Promise<void>;
 }
 
+function statusPillToneClass(tone: 'slate' | 'amber' | 'sky' | 'emerald' | 'rose'): string {
+  switch (tone) {
+    case 'emerald':
+      return 'bg-emerald-50 text-emerald-700 border border-emerald-200';
+    case 'amber':
+      return 'bg-amber-50 text-amber-800 border border-amber-200';
+    case 'sky':
+      return 'bg-sky-50 text-sky-800 border border-sky-200';
+    case 'rose':
+      return 'bg-rose-50 text-rose-700 border border-rose-200';
+    default:
+      return 'bg-slate-100 text-slate-600 border border-slate-200';
+  }
+}
+
 export function OfficerManagementSection({
   classConfig,
   students,
   officerAccounts,
+  roleAssignments = [],
+  roleAssignmentHistory = [],
+  governance: externalGovernance,
   officerLoginStatusMap = {},
   permissionAuditLogs,
+  onOpenReconciliationModal,
   onCreateOfficerAccount,
   onUpdateOfficerRoles,
   onToggleMonitorDirectAttendance,
   onToggleOfficerLock,
+  onLockOfficerWithReason,
+  onRelinkExistingOfficerAccount,
+  onActivateOfficerPosition,
+  onRevokeOfficerPosition,
   onResetOfficerPassword,
   onBatchResetPasswords,
   onDeleteOfficerAccount,
@@ -174,6 +230,9 @@ export function OfficerManagementSection({
   const [resetMustChange, setResetMustChange] = useState(false);
   const [showResetPw, setShowResetPw] = useState(false);
   const [busyStudentCode, setBusyStudentCode] = useState<string | null>(null);
+  const [lockTargetAccount, setLockTargetAccount] = useState<OfficerAccountRecord | null>(null);
+  const [lockReasonInput, setLockReasonInput] = useState('');
+  const [actionSuccessBanner, setActionSuccessBanner] = useState('');
 
   // Đổi mật khẩu hàng loạt cho các nickname được chọn (GVCN nhập trực tiếp, không hardcode)
   const [selectedBatchCodes, setSelectedBatchCodes] = useState<string[]>([]);
@@ -183,14 +242,45 @@ export function OfficerManagementSection({
   const [isRunningBatch, setIsRunningBatch] = useState(false);
   const [batchFeedback, setBatchFeedback] = useState<string>('');
 
-  const assignedStudentCodes = useMemo(
-    () => new Set(officerAccounts.map((a) => a.studentCode)),
-    [officerAccounts]
+  const governance = useMemo(
+    () =>
+      externalGovernance ||
+      analyzeOfficerPositionsAndAccounts({
+        students,
+        officerAccounts,
+        roleAssignments,
+        officerLoginStatusMap,
+      }),
+    [externalGovernance, students, officerAccounts, roleAssignments, officerLoginStatusMap]
   );
 
+  const analyzedByCode = useMemo(() => {
+    const map: Record<string, (typeof governance.analyzedAccounts)[number]> = {};
+    for (const item of governance.analyzedAccounts) {
+      map[item.account.studentCode] = item;
+    }
+    return map;
+  }, [governance]);
+
+  const assignedStudentIdsOrCodes = useMemo(() => {
+    const set = new Set<string>();
+    for (const item of governance.analyzedAccounts) {
+      set.add(item.account.studentCode);
+      if (item.account.studentId) set.add(item.account.studentId);
+      if (item.matchedStudent) {
+        set.add(item.matchedStudent.id);
+        set.add(item.matchedStudent.code);
+      }
+    }
+    return set;
+  }, [governance]);
+
   const availableStudents = useMemo(
-    () => students.filter((st) => !assignedStudentCodes.has(st.code)),
-    [students, assignedStudentCodes]
+    () =>
+      students.filter(
+        (st) => !assignedStudentIdsOrCodes.has(st.code) && !assignedStudentIdsOrCodes.has(st.id)
+      ),
+    [students, assignedStudentIdsOrCodes]
   );
 
   const handlePrimaryRoleChange = (nextRole: OfficerRoleId) => {
@@ -379,9 +469,36 @@ export function OfficerManagementSection({
               Cấp tài khoản Firebase Auth thật (Nickname duy nhất toàn hệ thống, hỗ trợ kiêm nhiệm tối đa 2 chức vụ trên 1 tài khoản, không lưu mật khẩu dạng văn bản trong Firestore).
             </p>
           </div>
-          <span className="px-3 py-1 rounded-lg bg-white/15 text-xs font-bold">
-            {officerAccounts.length} tài khoản đã cấp
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="px-3 py-1 rounded-lg bg-emerald-400/20 border border-emerald-200/40 text-emerald-100 text-xs font-bold">
+              {governance.activeAccountsCount} đang hoạt động / {governance.totalCreatedAccountsCount} bản ghi TK
+            </span>
+            {governance.pendingActivationAccountsCount > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-sky-400/20 border border-sky-200/40 text-sky-100 text-xs font-bold">
+                {governance.pendingActivationAccountsCount} chờ kích hoạt
+              </span>
+            )}
+            {governance.lockedAccountsCount + governance.revokedAccountsCount > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-rose-500/30 border border-rose-200/40 text-rose-100 text-xs font-bold">
+                {governance.lockedAccountsCount} khóa • {governance.revokedAccountsCount} thu hồi
+              </span>
+            )}
+            {governance.mismatchedAccountsCount > 0 && (
+              <span className="px-2.5 py-1 rounded-lg bg-amber-400/25 border border-amber-200/40 text-amber-100 text-xs font-bold">
+                {governance.mismatchedAccountsCount} liên kết lệch
+              </span>
+            )}
+            {onOpenReconciliationModal && (
+              <button
+                type="button"
+                onClick={onOpenReconciliationModal}
+                className="px-3 py-1.5 rounded-lg bg-white text-[#102744] hover:bg-teal-50 text-xs font-bold inline-flex items-center gap-1.5 shadow-xs"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-[#0C9BA6]" />
+                <span>Rà soát &amp; Kích hoạt 7 vị trí</span>
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="p-5 space-y-6">
@@ -448,6 +565,22 @@ export function OfficerManagementSection({
             </div>
           )}
 
+          {actionSuccessBanner && (
+            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 font-medium">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>{actionSuccessBanner}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActionSuccessBanner('')}
+                className="text-emerald-700 font-bold hover:underline"
+              >
+                Đóng
+              </button>
+            </div>
+          )}
+
           {/* Thẻ hiển thị mật khẩu 1 lần duy nhất */}
           {issuedCredential && (
             <div className="p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-300 space-y-3">
@@ -511,15 +644,39 @@ export function OfficerManagementSection({
                 </label>
                 <select
                   value={selectedStudentCode}
-                  onChange={(e) => setSelectedStudentCode(e.target.value)}
+                  onChange={(e) => {
+                    const code = e.target.value;
+                    setSelectedStudentCode(code);
+                    const picked = availableStudents.find((s) => s.code === code);
+                    if (picked) {
+                      const pickedRoles = getStudentRoles(picked);
+                      if (pickedRoles.length > 0) {
+                        setPrimaryRole(pickedRoles[0]);
+                        setSecondaryRole(pickedRoles[1] || '');
+                        setNickname(suggestNicknameForClass(classConfig.className, pickedRoles[0]));
+                      }
+                    }
+                  }}
                   className="w-full px-3 py-2 rounded-xl border border-slate-300 bg-white text-sm focus:outline-hidden focus:ring-2 focus:ring-[#0C9BA6]"
                 >
                   <option value="">-- Chọn học sinh --</option>
-                  {availableStudents.map((st) => (
-                    <option key={st.code} value={st.code}>
-                      {st.fullName} ({st.code} • Tổ {st.team})
-                    </option>
-                  ))}
+                  {[...availableStudents]
+                    .sort((a, b) => {
+                      const aHas = getStudentRoles(a).length > 0 ? 1 : 0;
+                      const bHas = getStudentRoles(b).length > 0 ? 1 : 0;
+                      if (bHas !== aHas) return bHas - aHas;
+                      return compareStudentsByRosterOrder(a, b);
+                    })
+                    .map((st) => {
+                      const stRoles = getStudentRoles(st);
+                      return (
+                        <option key={st.code} value={st.code}>
+                          {isValidRosterOrder(st.rosterOrder) ? `#${st.rosterOrder} ` : ''}
+                          {st.fullName} ({st.code} • Tổ {st.team}
+                          {stRoles.length > 0 ? ` — ${formatStudentRolesLabel(stRoles)}` : ''})
+                        </option>
+                      );
+                    })}
                 </select>
               </div>
 
@@ -704,15 +861,17 @@ export function OfficerManagementSection({
                           onChange={toggleSelectAllBatch}
                         />
                       </th>
-                      <th className="py-3 px-3">Học sinh / Nickname</th>
+                      <th className="py-3 px-3">Học sinh / Nickname / Mã MOET</th>
                       <th className="py-3 px-3">Chức vụ & Phạm vi</th>
-                      <th className="py-3 px-3">Trạng thái</th>
+                      <th className="py-3 px-3">Trạng thái TK Firebase Auth</th>
+                      <th className="py-3 px-3">Trạng thái quyền trong lớp</th>
                       <th className="py-3 px-3 text-right">Thao tác quản trị</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
                     {officerAccounts.map((acc) => {
                       const isBusy = busyStudentCode === acc.studentCode;
+                      const analyzed = analyzedByCode[acc.studentCode];
                       const liveStatus = officerLoginStatusMap[acc.officerUid];
                       const lastLoginAtMs = liveStatus?.lastLoginAtMs;
                       const effectiveMustChange =
@@ -720,27 +879,67 @@ export function OfficerManagementSection({
                           ? liveStatus.mustChangePassword
                           : acc.mustChangePassword;
                       const isMonitorAccount = acc.roles.includes('lop_truong');
+                      const matchedSt = analyzed?.matchedStudent || null;
+                      const relinkSt = analyzed?.relinkCandidateStudent || null;
+                      const officialRoleForAccount = matchedSt
+                        ? roleAssignments.find(
+                            (ra) => ra.studentId === matchedSt.id && ra.status !== 'revoked'
+                          ) || null
+                        : null;
+                      const canRunEightPointActivate = Boolean(
+                        onActivateOfficerPosition &&
+                          officialRoleForAccount &&
+                          analyzed &&
+                          analyzed.classPermissionStatus !== 'active' &&
+                          !analyzed.securityLockReason
+                      );
                       return (
-                        <tr key={acc.studentCode} className="hover:bg-slate-50/70">
-                          <td className="py-3 px-3">
+                        <tr
+                          key={acc.studentCode}
+                          className={
+                            analyzed &&
+                            (analyzed.linkage === 'mismatched_student' ||
+                              analyzed.linkage === 'orphan_not_in_roster')
+                              ? 'bg-rose-50/40'
+                              : analyzed && analyzed.linkage === 'legacy_code_relinkable'
+                                ? 'bg-amber-50/30'
+                                : 'hover:bg-slate-50/70'
+                          }
+                        >
+                          <td className="py-3 px-3 align-top">
                             <input
                               type="checkbox"
                               checked={selectedBatchCodes.includes(acc.studentCode)}
                               onChange={() => toggleBatchSelect(acc.studentCode)}
                             />
                           </td>
-                          <td className="py-3 px-3">
+                          <td className="py-3 px-3 align-top">
                             <div className="font-bold text-[#102744]">{acc.studentName}</div>
-                            <div className="text-xs text-slate-500 flex items-center gap-2 mt-0.5">
+                            <div className="text-xs text-slate-500 flex flex-wrap items-center gap-1.5 mt-0.5">
                               <span className="font-mono font-bold text-[#0C9BA6] bg-teal-50 px-1.5 py-0.5 rounded">
                                 {acc.nickname}
                               </span>
+                              <span className="font-mono text-[11px]">
+                                MOET: {(matchedSt ? getStudentMoetCode(matchedSt) : acc.moetCode) || acc.studentCode}
+                              </span>
                               <span>
-                                {acc.studentCode} • Tổ {acc.team} • v{acc.credentialVersion}
+                                • Tổ {matchedSt ? matchedSt.team : acc.team} • v{acc.credentialVersion}
                               </span>
                             </div>
+                            {analyzed && analyzed.linkage !== 'exact_match' && (
+                              <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-200 text-[10px] font-bold">
+                                <AlertTriangle className="w-3 h-3 shrink-0" />
+                                <span>
+                                  {analyzed.linkage === 'legacy_code_relinkable'
+                                    ? `Mã cũ (${acc.studentCode}) → có thể liên kết lại với ${relinkSt?.fullName}`
+                                    : analyzed.linkage === 'mismatched_student'
+                                      ? 'Liên kết lệch học sinh — Cấm tự gộp UID'
+                                      : 'Không khớp danh sách lớp hiện tại'}
+                                </span>
+                              </div>
+                            )}
                           </td>
-                          <td className="py-3 px-3">
+                          <td className="py-3 px-3 align-top">
                             <div className="flex flex-wrap gap-1.5">
                               {acc.roles.map((r) => (
                                 <span
@@ -800,16 +999,15 @@ export function OfficerManagementSection({
                               </div>
                             )}
                           </td>
-                          <td className="py-3 px-3">
+                          <td className="py-3 px-3 align-top">
                             <div className="space-y-1">
                               <span
-                                className={`inline-flex px-2 py-0.5 rounded-md text-[11px] font-bold ${
-                                  acc.active
-                                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                    : 'bg-rose-50 text-rose-700 border border-rose-200'
-                                }`}
+                                className={`inline-flex px-2 py-0.5 rounded-md text-[11px] font-bold ${statusPillToneClass(
+                                  analyzed?.firebaseAuthTone || (acc.active ? 'emerald' : 'rose')
+                                )}`}
                               >
-                                {acc.active ? 'Đang hoạt động' : 'Đang bị khóa'}
+                                {analyzed?.firebaseAuthStatusLabel ||
+                                  (acc.active ? 'Đã tạo Firebase Auth (Bật)' : 'Đã tạo Firebase Auth (Tắt)')}
                               </span>
                               <div className="text-[11px] text-slate-600 flex items-center gap-1">
                                 <Clock className="w-3 h-3 text-slate-400 shrink-0" />
@@ -832,8 +1030,98 @@ export function OfficerManagementSection({
                               </div>
                             </div>
                           </td>
-                          <td className="py-3 px-3 text-right">
+                          <td className="py-3 px-3 align-top">
+                            <div className="space-y-1">
+                              <span
+                                className={`inline-flex px-2 py-0.5 rounded-md text-[11px] font-bold ${statusPillToneClass(
+                                  analyzed?.classPermissionTone || (acc.active ? 'emerald' : 'rose')
+                                )}`}
+                              >
+                                {analyzed?.classPermissionLabel ||
+                                  (acc.active ? 'Đang hoạt động' : 'Tạm khóa')}
+                              </span>
+                              {analyzed?.securityLockReason && (
+                                <div className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-200 rounded px-1.5 py-0.5">
+                                  Lý do khóa bảo mật: {analyzed.securityLockReason}
+                                </div>
+                              )}
+                              {analyzed?.diagnosticNote && (
+                                <div className="text-[10px] text-slate-500 leading-snug max-w-[210px]">
+                                  {analyzed.diagnosticNote}
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                          <td className="py-3 px-3 align-top text-right">
                             <div className="inline-flex flex-wrap justify-end gap-1.5">
+                              {analyzed?.linkage === 'legacy_code_relinkable' &&
+                                relinkSt &&
+                                onRelinkExistingOfficerAccount && (
+                                  <button
+                                    type="button"
+                                    disabled={isBusy}
+                                    onClick={async () => {
+                                      setBusyStudentCode(acc.studentCode);
+                                      setFormError('');
+                                      setActionSuccessBanner('');
+                                      try {
+                                        await onRelinkExistingOfficerAccount(
+                                          acc,
+                                          relinkSt,
+                                          acc.roles
+                                        );
+                                        setActionSuccessBanner(
+                                          `Đã liên kết lại tài khoản ${acc.nickname} (giữ nguyên Firebase UID) với ${relinkSt.fullName}.`
+                                        );
+                                      } catch (err) {
+                                        setFormError(
+                                          err instanceof Error
+                                            ? err.message
+                                            : 'Không thể liên kết lại tài khoản.'
+                                        );
+                                      } finally {
+                                        setBusyStudentCode(null);
+                                      }
+                                    }}
+                                    className="px-2.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-bold inline-flex items-center gap-1"
+                                    title="Liên kết lại cùng 1 học sinh theo Mã MOET, giữ nguyên UID"
+                                  >
+                                    <Link2 className="w-3.5 h-3.5" />
+                                    <span>Liên kết TK</span>
+                                  </button>
+                                )}
+                              {canRunEightPointActivate && officialRoleForAccount && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={async () => {
+                                    setBusyStudentCode(acc.studentCode);
+                                    setFormError('');
+                                    setActionSuccessBanner('');
+                                    try {
+                                      const res = await onActivateOfficerPosition!({
+                                        roleId: officialRoleForAccount.roleId,
+                                        securityLockVerifiedByGvcn: false,
+                                      });
+                                      if (res.ok) setActionSuccessBanner(res.message);
+                                      else setFormError(res.message);
+                                    } catch (err) {
+                                      setFormError(
+                                        err instanceof Error
+                                          ? err.message
+                                          : 'Không thể kích hoạt quyền.'
+                                      );
+                                    } finally {
+                                      setBusyStudentCode(null);
+                                    }
+                                  }}
+                                  className="px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold inline-flex items-center gap-1"
+                                  title="Chạy kiểm tra 8 bước & kích hoạt quyền trong lớp"
+                                >
+                                  <ShieldCheck className="w-3.5 h-3.5" />
+                                  <span>Kích hoạt quyền</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 disabled={isBusy}
@@ -866,9 +1154,25 @@ export function OfficerManagementSection({
                                 type="button"
                                 disabled={isBusy}
                                 onClick={async () => {
+                                  if (acc.active && onLockOfficerWithReason) {
+                                    setLockTargetAccount(acc);
+                                    setLockReasonInput('');
+                                    return;
+                                  }
+                                  if (!acc.active && analyzed?.securityLockReason && onOpenReconciliationModal) {
+                                    onOpenReconciliationModal();
+                                    return;
+                                  }
                                   setBusyStudentCode(acc.studentCode);
+                                  setFormError('');
                                   try {
                                     await onToggleOfficerLock(acc);
+                                  } catch (err) {
+                                    setFormError(
+                                      err instanceof Error
+                                        ? err.message
+                                        : 'Không thể thay đổi trạng thái khóa.'
+                                    );
                                   } finally {
                                     setBusyStudentCode(null);
                                   }
@@ -878,19 +1182,60 @@ export function OfficerManagementSection({
                                     ? 'bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200'
                                     : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200'
                                 }`}
+                                title={
+                                  acc.active
+                                    ? 'Tạm khóa quyền đăng nhập (có thể ghi lý do bảo mật)'
+                                    : analyzed?.securityLockReason
+                                      ? 'Tài khoản bị khóa bảo mật — mở màn hình Rà soát để xác minh trước khi mở khóa'
+                                      : 'Mở khóa tài khoản'
+                                }
                               >
                                 {acc.active ? (
                                   <>
                                     <Lock className="w-3.5 h-3.5" />
-                                    <span>Khóa</span>
+                                    <span>Tạm khóa</span>
                                   </>
                                 ) : (
                                   <>
                                     <Unlock className="w-3.5 h-3.5" />
-                                    <span>Mở khóa</span>
+                                    <span>
+                                      {analyzed?.securityLockReason ? 'Xác minh mở khóa' : 'Mở khóa'}
+                                    </span>
                                   </>
                                 )}
                               </button>
+                              {onRevokeOfficerPosition && acc.permissionStatus !== 'revoked' && (
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={async () => {
+                                    setBusyStudentCode(acc.studentCode);
+                                    setFormError('');
+                                    try {
+                                      await onRevokeOfficerPosition(
+                                        acc,
+                                        'GVCN thu hồi chức vụ trực tiếp tại bảng quản lý tài khoản'
+                                      );
+                                      setActionSuccessBanner(
+                                        `Đã thu hồi chức vụ và ngắt quyền của ${acc.nickname} (lưu lịch sử phân quyền).`
+                                      );
+                                    } catch (err) {
+                                      setFormError(
+                                        err instanceof Error
+                                          ? err.message
+                                          : 'Không thể thu hồi chức vụ.'
+                                      );
+                                    } finally {
+                                      setBusyStudentCode(null);
+                                    }
+                                  }}
+                                  className="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-800 border border-rose-200 text-xs font-bold inline-flex items-center gap-1"
+                                  title="Thu hồi chức vụ & ngắt quyền tức thì (lưu lịch sử, không xóa hồ sơ học sinh)"
+                                >
+                                  <UserX className="w-3.5 h-3.5" />
+                                  <span>Thu hồi CV</span>
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 disabled={isBusy}
@@ -902,11 +1247,10 @@ export function OfficerManagementSection({
                                     setBusyStudentCode(null);
                                   }
                                 }}
-                                className="px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 text-xs font-bold inline-flex items-center gap-1"
-                                title="Thu hồi toàn bộ tài khoản"
+                                className="px-2 py-1.5 rounded-lg bg-white hover:bg-rose-50 text-rose-600 border border-rose-200 text-xs font-bold inline-flex items-center gap-1"
+                                title="Xóa hẳn bản ghi tài khoản khỏi danh sách (không ảnh hưởng hồ sơ học sinh)"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
-                                <span>Thu hồi</span>
                               </button>
                             </div>
                           </td>
@@ -918,6 +1262,71 @@ export function OfficerManagementSection({
               </div>
             )}
           </div>
+
+          {/* Hộp nhập lý do Tạm khóa quyền (tránh dùng window.prompt) */}
+          {lockTargetAccount && onLockOfficerWithReason && (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setBusyStudentCode(lockTargetAccount.studentCode);
+                setFormError('');
+                try {
+                  await onLockOfficerWithReason(lockTargetAccount, lockReasonInput.trim());
+                  setActionSuccessBanner(
+                    `Đã tạm khóa quyền của ${lockTargetAccount.nickname}${
+                      lockReasonInput.trim() ? ` (Lý do: ${lockReasonInput.trim()})` : ''
+                    }.`
+                  );
+                  setLockTargetAccount(null);
+                  setLockReasonInput('');
+                } catch (err) {
+                  setFormError(
+                    err instanceof Error ? err.message : 'Không thể tạm khóa tài khoản.'
+                  );
+                } finally {
+                  setBusyStudentCode(null);
+                }
+              }}
+              className="p-4 rounded-2xl bg-amber-50 border border-amber-300 space-y-3"
+            >
+              <div className="font-bold text-sm text-amber-950 flex items-center gap-2">
+                <Lock className="w-4 h-4 text-amber-700" />
+                <span>
+                  Tạm khóa quyền tài khoản {lockTargetAccount.studentName} (
+                  <code>{lockTargetAccount.nickname}</code>)
+                </span>
+              </div>
+              <p className="text-xs text-amber-900">
+                Nếu nhập lý do bảo mật (ví dụ: nghi lộ mật khẩu, sai người dùng), hệ thống sẽ gắn cờ <strong>Khóa bảo mật</strong> và tuyệt đối không tự mở lại khi kích hoạt hàng loạt.
+              </p>
+              <div className="flex flex-wrap gap-2 items-center">
+                <input
+                  type="text"
+                  value={lockReasonInput}
+                  onChange={(e) => setLockReasonInput(e.target.value)}
+                  placeholder="Lý do tạm khóa / khóa bảo mật (tùy chọn)..."
+                  className="flex-1 min-w-[220px] px-3 py-2 rounded-xl border border-amber-300 bg-white text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLockTargetAccount(null);
+                    setLockReasonInput('');
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-white border border-slate-300 text-xs font-bold text-slate-700"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  disabled={busyStudentCode === lockTargetAccount.studentCode}
+                  className="px-4 py-2 rounded-xl bg-amber-700 hover:bg-amber-800 text-white text-xs font-bold"
+                >
+                  Xác nhận tạm khóa
+                </button>
+              </div>
+            </form>
+          )}
 
           {/* Công cụ đổi mật khẩu hàng loạt cho các tài khoản đã chọn */}
           {officerAccounts.length > 0 && (
@@ -1110,6 +1519,41 @@ export function OfficerManagementSection({
                 <span>Yêu cầu học sinh tự đổi lại mật khẩu khi đăng nhập</span>
               </label>
             </form>
+          )}
+
+          {/* Lịch sử phân công 7 vị trí bất biến (role_assignment_history) */}
+          {roleAssignmentHistory.length > 0 && (
+            <div className="space-y-2 pt-2 border-t border-slate-100">
+              <div className="text-xs font-bold text-[#102744] flex items-center gap-1.5">
+                <ShieldCheck className="w-3.5 h-3.5 text-[#0C9BA6]" />
+                <span>Lịch sử phân công chính thức 7 vị trí ({roleAssignmentHistory.length})</span>
+              </div>
+              <div className="max-h-48 overflow-y-auto space-y-1.5">
+                {roleAssignmentHistory.slice(0, 15).map((item) => (
+                  <div
+                    key={item.id}
+                    className="text-xs bg-teal-50/50 border border-teal-200/80 rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2"
+                  >
+                    <div>
+                      <span className="font-bold text-[#102744]">{getRoleTitle(item.roleId)}</span>:{' '}
+                      {item.previousStudentName ? (
+                        <span className="text-slate-600">
+                          {item.previousStudentName} → <strong>{item.newStudentName || 'Đã thu hồi'}</strong>
+                        </span>
+                      ) : (
+                        <span className="text-slate-700 font-semibold">{item.newStudentName}</span>
+                      )}
+                      {item.reason && (
+                        <span className="text-slate-500"> — {item.reason}</span>
+                      )}
+                    </div>
+                    <span className="text-[11px] text-slate-400">
+                      {new Date(item.changedAtMs).toLocaleString('vi-VN')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
 
           {/* Nhật ký thay đổi phân quyền */}

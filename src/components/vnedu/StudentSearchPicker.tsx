@@ -2,7 +2,10 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertCircle, Check, ChevronDown, Search, UserCheck, X } from 'lucide-react';
 import type { StudentRecord } from '../../types/gvcn';
-import { stripVietnameseAccents } from '../../utils/studentExcelImport';
+import {
+  compareStudentsByRosterOrder,
+  stripVietnameseAccents,
+} from '../../utils/studentExcelImport';
 
 interface StudentSearchPickerProps {
   students: StudentRecord[];
@@ -104,9 +107,7 @@ export function StudentSearchPicker({
   const candidateIds = useMemo(() => new Set(candidates.map((c) => c.id)), [candidates]);
 
   const filteredList = useMemo(() => {
-    const sorted = [...students].sort(
-      (a, b) => a.team - b.team || a.fullName.localeCompare(b.fullName, 'vi')
-    );
+    const sorted = [...students].sort(compareStudentsByRosterOrder);
     const qRaw = query.trim().toLowerCase();
     const qNoAccent = stripVietnameseAccents(query);
 

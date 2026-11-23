@@ -121,6 +121,23 @@ service cloud.firestore {
         data.updatedAt is timestamp;
     }
 
+    function isValidTeacherAiKeyVault(data, userId) {
+      return hasValidOwnerAndTimestamps(data, userId) &&
+        data.keys().hasAll(['ownerUid', 'provider', 'alg', 'keyVersion', 'saltB64', 'ivB64', 'authTagB64', 'ciphertextB64', 'maskedHint', 'status', 'lastVerifiedAtMs', 'updatedAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'provider', 'alg', 'keyVersion', 'saltB64', 'ivB64', 'authTagB64', 'ciphertextB64', 'maskedHint', 'status', 'lastVerifiedAtMs', 'updatedAtMs', 'createdAt', 'updatedAt']) &&
+        data.provider == 'gemini' &&
+        data.alg == 'aes-256-gcm' &&
+        data.keyVersion in ['v1-env', 'v1-fallback'] &&
+        data.saltB64 is string && data.saltB64.size() >= 16 && data.saltB64.size() <= 128 &&
+        data.ivB64 is string && data.ivB64.size() >= 12 && data.ivB64.size() <= 64 &&
+        data.authTagB64 is string && data.authTagB64.size() >= 16 && data.authTagB64.size() <= 64 &&
+        data.ciphertextB64 is string && data.ciphertextB64.size() >= 16 && data.ciphertextB64.size() <= 1024 &&
+        data.maskedHint is string && data.maskedHint.size() > 0 && data.maskedHint.size() <= 40 &&
+        data.status == 'connected' &&
+        data.lastVerifiedAtMs is number &&
+        data.updatedAtMs is number;
+    }
+
     function isValidClassConfig(data, userId) {
       return data.keys().hasAll(['ownerUid', 'teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'fundBalance', 'createdAt', 'updatedAt']) &&
         data.keys().hasOnly(['ownerUid', 'teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'fundBalance', 'createdAt', 'updatedAt']) &&
@@ -147,16 +164,18 @@ service cloud.firestore {
 
     function isValidStudent(data, userId) {
       return data.keys().hasAll(['ownerUid', 'code', 'fullName', 'gender', 'team', 'role', 'meritPoints', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['ownerUid', 'code', 'moetCode', 'fullName', 'gender', 'dob', 'team', 'role', 'secondRole', 'note', 'meritPoints', 'attendancePresent', 'attendanceAbsent', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'code', 'moetCode', 'fullName', 'gender', 'dob', 'team', 'rosterOrder', 'role', 'secondRole', 'roles', 'note', 'meritPoints', 'attendancePresent', 'attendanceAbsent', 'createdAt', 'updatedAt']) &&
         hasValidOwnerAndTimestamps(data, userId) &&
         data.code is string && data.code.size() > 0 && data.code.size() <= 40 && data.code.matches('^[A-Z0-9_\\-]+$') &&
         (!('moetCode' in data) || (data.moetCode is string && data.moetCode.size() <= 40 && (data.moetCode == '' || data.moetCode.matches('^[A-Z0-9_\\-]+$')))) &&
         data.fullName is string && data.fullName.size() > 0 && data.fullName.size() <= 150 &&
         data.gender in ['Nam', 'Nữ'] &&
         (!('dob' in data) || (data.dob is string && data.dob.size() <= 30)) &&
-        data.team is number && data.team >= 1 && data.team <= 4 &&
+        data.team is number && data.team >= 0 && data.team <= 4 &&
+        (!('rosterOrder' in data) || (data.rosterOrder is int && data.rosterOrder >= 1 && data.rosterOrder <= 500)) &&
         data.role is string && data.role.size() > 0 && data.role.size() <= 40 &&
         (!('secondRole' in data) || (data.secondRole is string && data.secondRole.size() <= 40)) &&
+        (!('roles' in data) || (data.roles is list && data.roles.size() <= 2 && data.roles.hasOnly(['lop_truong', 'to_truong_1', 'to_truong_2', 'to_truong_3', 'to_truong_4', 'thu_quy', 'bi_thu']))) &&
         (!('note' in data) || (data.note is string && data.note.size() <= 500)) &&
         data.meritPoints is number &&
         (!('attendancePresent' in data) || data.attendancePresent is number) &&
@@ -450,7 +469,7 @@ service cloud.firestore {
 
     function isValidOfficerMembership(data, officerUid) {
       return data.keys().hasAll(['officerUid', 'teacherUid', 'workspaceId', 'schoolName', 'className', 'schoolYear', 'teacherName', 'studentCode', 'studentName', 'nickname', 'nicknameId', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'credentialVersion', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['officerUid', 'teacherUid', 'workspaceId', 'schoolName', 'className', 'schoolYear', 'teacherName', 'studentCode', 'studentName', 'nickname', 'nicknameId', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'allowDirectClassAttendance', 'lastLoginAtMs', 'credentialVersion', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['officerUid', 'teacherUid', 'workspaceId', 'schoolName', 'className', 'schoolYear', 'teacherName', 'studentCode', 'studentId', 'moetCode', 'studentName', 'nickname', 'nicknameId', 'roles', 'assignedTeam', 'active', 'permissionStatus', 'securityLockReason', 'mustChangePassword', 'allowDirectClassAttendance', 'lastLoginAtMs', 'credentialVersion', 'createdAt', 'updatedAt']) &&
         data.officerUid is string && data.officerUid == officerUid && isValidId(data.officerUid) &&
         data.teacherUid is string && isValidId(data.teacherUid) &&
         data.workspaceId is string && isValidId(data.workspaceId) &&
@@ -459,12 +478,16 @@ service cloud.firestore {
         data.schoolYear is string && data.schoolYear.size() > 0 && data.schoolYear.size() <= 50 &&
         data.teacherName is string && data.teacherName.size() > 0 && data.teacherName.size() <= 120 &&
         data.studentCode is string && data.studentCode.size() > 0 && data.studentCode.size() <= 40 &&
+        (!('studentId' in data) || (data.studentId is string && data.studentId.size() <= 40)) &&
+        (!('moetCode' in data) || (data.moetCode is string && data.moetCode.size() <= 40)) &&
         data.studentName is string && data.studentName.size() > 0 && data.studentName.size() <= 150 &&
         data.nickname is string && data.nickname.size() >= 3 && data.nickname.size() <= 60 &&
         data.nicknameId is string && isValidId(data.nicknameId) &&
         isValidOfficerRolesList(data.roles) &&
         data.assignedTeam is number && data.assignedTeam >= 0 && data.assignedTeam <= 4 &&
         data.active is bool &&
+        (!('permissionStatus' in data) || data.permissionStatus in ['pending_activation', 'active', 'locked', 'revoked']) &&
+        (!('securityLockReason' in data) || (data.securityLockReason is string && data.securityLockReason.size() <= 300)) &&
         data.mustChangePassword is bool &&
         (!('allowDirectClassAttendance' in data) || data.allowDirectClassAttendance is bool) &&
         (!('lastLoginAtMs' in data) || data.lastLoginAtMs is number) &&
@@ -475,9 +498,11 @@ service cloud.firestore {
 
     function isValidOfficerAccount(data, userId) {
       return data.keys().hasAll(['ownerUid', 'studentCode', 'studentName', 'team', 'nickname', 'nicknameId', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'credentialVersion', 'createdAt', 'updatedAt']) &&
-        data.keys().hasOnly(['ownerUid', 'studentCode', 'studentName', 'team', 'nickname', 'nicknameId', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'studentCode', 'studentId', 'moetCode', 'studentName', 'team', 'nickname', 'nicknameId', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'permissionStatus', 'securityLockReason', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'createdAt', 'updatedAt']) &&
         hasValidOwnerAndTimestamps(data, userId) &&
         data.studentCode is string && data.studentCode.size() > 0 && data.studentCode.size() <= 40 &&
+        (!('studentId' in data) || (data.studentId is string && data.studentId.size() <= 40)) &&
+        (!('moetCode' in data) || (data.moetCode is string && data.moetCode.size() <= 40)) &&
         data.studentName is string && data.studentName.size() > 0 && data.studentName.size() <= 150 &&
         data.team is number && data.team >= 1 && data.team <= 4 &&
         data.nickname is string && data.nickname.size() >= 3 && data.nickname.size() <= 60 &&
@@ -487,9 +512,45 @@ service cloud.firestore {
         isValidOfficerRolesList(data.roles) &&
         data.assignedTeam is number && data.assignedTeam >= 0 && data.assignedTeam <= 4 &&
         data.active is bool &&
+        (!('permissionStatus' in data) || data.permissionStatus in ['pending_activation', 'active', 'locked', 'revoked']) &&
+        (!('securityLockReason' in data) || (data.securityLockReason is string && data.securityLockReason.size() <= 300)) &&
         data.mustChangePassword is bool &&
         (!('allowDirectClassAttendance' in data) || data.allowDirectClassAttendance is bool) &&
         data.credentialVersion is number && data.credentialVersion >= 1 && data.credentialVersion <= 100;
+    }
+
+    function isValidRoleAssignment(data, userId, roleId) {
+      return data.keys().hasAll(['ownerUid', 'roleId', 'studentId', 'studentCode', 'studentName', 'team', 'status', 'confirmedByEmail', 'confirmedAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'roleId', 'studentId', 'studentCode', 'moetCode', 'studentName', 'team', 'officerUid', 'nickname', 'status', 'teamMismatchAcknowledged', 'confirmedByEmail', 'confirmedAtMs', 'createdAt', 'updatedAt']) &&
+        hasValidOwnerAndTimestamps(data, userId) &&
+        data.roleId == roleId &&
+        data.roleId in ['lop_truong', 'to_truong_1', 'to_truong_2', 'to_truong_3', 'to_truong_4', 'thu_quy', 'bi_thu'] &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 40 &&
+        data.studentCode is string && data.studentCode.size() > 0 && data.studentCode.size() <= 40 &&
+        (!('moetCode' in data) || (data.moetCode is string && data.moetCode.size() <= 40)) &&
+        data.studentName is string && data.studentName.size() > 0 && data.studentName.size() <= 150 &&
+        data.team is number && data.team >= 1 && data.team <= 4 &&
+        (!('officerUid' in data) || (data.officerUid is string && data.officerUid.size() <= 128)) &&
+        (!('nickname' in data) || (data.nickname is string && data.nickname.size() <= 60)) &&
+        data.status in ['assigned_no_account', 'has_account_pending_activation', 'active', 'locked', 'revoked'] &&
+        (!('teamMismatchAcknowledged' in data) || data.teamMismatchAcknowledged is bool) &&
+        data.confirmedByEmail is string && data.confirmedByEmail.size() > 0 && data.confirmedByEmail.size() <= 200 &&
+        data.confirmedAtMs is number;
+    }
+
+    function isValidRoleAssignmentHistory(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'roleId', 'previousStudentId', 'previousStudentName', 'newStudentId', 'newStudentName', 'reason', 'changedByEmail', 'changedAtMs', 'createdAt']) &&
+        data.keys().hasOnly(['ownerUid', 'roleId', 'previousStudentId', 'previousStudentName', 'newStudentId', 'newStudentName', 'reason', 'changedByEmail', 'changedAtMs', 'createdAt']) &&
+        data.ownerUid is string && data.ownerUid == userId &&
+        data.roleId in ['lop_truong', 'to_truong_1', 'to_truong_2', 'to_truong_3', 'to_truong_4', 'thu_quy', 'bi_thu'] &&
+        data.previousStudentId is string && data.previousStudentId.size() <= 40 &&
+        data.previousStudentName is string && data.previousStudentName.size() <= 150 &&
+        data.newStudentId is string && data.newStudentId.size() <= 40 &&
+        data.newStudentName is string && data.newStudentName.size() <= 150 &&
+        data.reason is string && data.reason.size() > 0 && data.reason.size() <= 400 &&
+        data.changedByEmail is string && data.changedByEmail.size() > 0 && data.changedByEmail.size() <= 200 &&
+        data.changedAtMs is number &&
+        data.createdAt is timestamp;
     }
 
     function isValidPermissionAuditLog(data, userId) {
@@ -504,6 +565,76 @@ service cloud.firestore {
         data.actorEmail is string && data.actorEmail.size() <= 200 &&
         data.timestampMs is number &&
         data.createdAt is timestamp;
+    }
+
+    function isValidPedagogicalObservation(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'studentId', 'studentCode', 'semester', 'officialConduct', 'officialAcademic', 'incidentStatus', 'sourceLabel', 'confirmedByEmail', 'confirmedAtMs', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'studentId', 'studentCode', 'moetCode', 'semester', 'officialConduct', 'officialAcademic', 'verifiedStrengths', 'verifiedImprovements', 'verifiedAchievements', 'verifiedIncidentNote', 'incidentStatus', 'sourceLabel', 'confirmedByEmail', 'confirmedAtMs', 'createdAt', 'updatedAt']) &&
+        data.ownerUid is string && data.ownerUid == userId &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 60 &&
+        data.studentCode is string && data.studentCode.size() > 0 && data.studentCode.size() <= 40 &&
+        (!('moetCode' in data) || (data.moetCode is string && data.moetCode.size() <= 60)) &&
+        data.semester in ['Học kỳ I', 'Học kỳ II', 'Cả năm'] &&
+        data.officialConduct in ['', 'Tốt', 'Khá', 'Đạt', 'Chưa đạt'] &&
+        data.officialAcademic in ['', 'Tốt', 'Khá', 'Đạt', 'Chưa đạt'] &&
+        (!('verifiedStrengths' in data) || (data.verifiedStrengths is string && data.verifiedStrengths.size() <= 1200)) &&
+        (!('verifiedImprovements' in data) || (data.verifiedImprovements is string && data.verifiedImprovements.size() <= 1200)) &&
+        (!('verifiedAchievements' in data) || (data.verifiedAchievements is string && data.verifiedAchievements.size() <= 1000)) &&
+        (!('verifiedIncidentNote' in data) || (data.verifiedIncidentNote is string && data.verifiedIncidentNote.size() <= 1200)) &&
+        data.incidentStatus in ['none', 'verified', 'pending_verification'] &&
+        data.sourceLabel is string && data.sourceLabel.size() > 0 && data.sourceLabel.size() <= 200 &&
+        data.confirmedByEmail is string && data.confirmedByEmail.size() > 0 && data.confirmedByEmail.size() <= 200 &&
+        data.confirmedAtMs is number &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReportCardComment(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'studentId', 'studentCode', 'studentName', 'semester', 'schoolYear', 'lengthMode', 'currentDraft', 'teacherEdited', 'status', 'versions', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'studentId', 'studentCode', 'moetCode', 'studentName', 'rosterOrder', 'semester', 'schoolYear', 'lengthMode', 'schoolTemplate', 'maxChars', 'currentDraft', 'teacherEdited', 'status', 'approvedByEmail', 'approvedAtMs', 'versions', 'createdAt', 'updatedAt']) &&
+        data.ownerUid is string && data.ownerUid == userId &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 60 &&
+        data.studentCode is string && data.studentCode.size() > 0 && data.studentCode.size() <= 40 &&
+        (!('moetCode' in data) || (data.moetCode is string && data.moetCode.size() <= 60)) &&
+        data.studentName is string && data.studentName.size() > 0 && data.studentName.size() <= 150 &&
+        (!('rosterOrder' in data) || (data.rosterOrder is number && data.rosterOrder >= 0 && data.rosterOrder <= 1000)) &&
+        data.semester in ['Học kỳ I', 'Học kỳ II', 'Cả năm'] &&
+        data.schoolYear is string && data.schoolYear.size() > 0 && data.schoolYear.size() <= 40 &&
+        data.lengthMode in ['short', 'standard', 'detailed'] &&
+        (!('schoolTemplate' in data) || (data.schoolTemplate is string && data.schoolTemplate.size() <= 400)) &&
+        (!('maxChars' in data) || (data.maxChars is number && data.maxChars >= 0 && data.maxChars <= 2000)) &&
+        data.currentDraft is string && data.currentDraft.size() <= 2000 &&
+        data.teacherEdited is bool &&
+        data.status in ['draft', 'approved_locked'] &&
+        (!('approvedByEmail' in data) || (data.approvedByEmail is string && data.approvedByEmail.size() <= 200)) &&
+        (!('approvedAtMs' in data) || data.approvedAtMs is number) &&
+        data.versions is list && data.versions.size() <= 15 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidParentMessage(data, userId) {
+      return data.keys().hasAll(['ownerUid', 'studentId', 'studentCode', 'studentName', 'semester', 'purpose', 'salutation', 'tone', 'incidentStatus', 'currentDraft', 'teacherEdited', 'status', 'versions', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['ownerUid', 'studentId', 'studentCode', 'moetCode', 'studentName', 'recipientName', 'semester', 'purpose', 'salutation', 'tone', 'incidentStatus', 'currentDraft', 'teacherEdited', 'status', 'approvedByEmail', 'approvedAtMs', 'versions', 'createdAt', 'updatedAt']) &&
+        data.ownerUid is string && data.ownerUid == userId &&
+        data.studentId is string && data.studentId.size() > 0 && data.studentId.size() <= 60 &&
+        data.studentCode is string && data.studentCode.size() > 0 && data.studentCode.size() <= 40 &&
+        (!('moetCode' in data) || (data.moetCode is string && data.moetCode.size() <= 60)) &&
+        data.studentName is string && data.studentName.size() > 0 && data.studentName.size() <= 150 &&
+        (!('recipientName' in data) || (data.recipientName is string && data.recipientName.size() <= 150)) &&
+        data.semester in ['Học kỳ I', 'Học kỳ II', 'Cả năm'] &&
+        data.purpose in ['khen_ngoi_dong_vien', 'thong_bao_tien_bo', 'nhac_nho_chuyen_can', 'nhac_nho_ne_nep', 'trao_doi_hoc_tap_giam', 'phoi_hop_su_viec_da_xac_minh', 'xac_minh_thong_tin_chua_xac_nhan', 'thong_bao_ke_hoach_hop_ph', 'dinh_huong_thi_tot_nghiep_12', 'dong_vien_tam_ly_hoan_canh'] &&
+        data.salutation is string && data.salutation.size() > 0 && data.salutation.size() <= 180 &&
+        data.tone in ['trang_trong', 'gan_gui', 'nhe_nhang', 'phoi_hop'] &&
+        data.incidentStatus in ['none', 'verified', 'pending_verification'] &&
+        data.currentDraft is string && data.currentDraft.size() <= 3000 &&
+        data.teacherEdited is bool &&
+        data.status in ['draft', 'approved_ready'] &&
+        (!('approvedByEmail' in data) || (data.approvedByEmail is string && data.approvedByEmail.size() <= 200)) &&
+        (!('approvedAtMs' in data) || data.approvedAtMs is number) &&
+        data.versions is list && data.versions.size() <= 15 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
     }
 
     // ========================================================================
@@ -550,7 +681,7 @@ service cloud.firestore {
         (
           (
             (isApprovedTeacher(existing().teacherUid) || isAdmin()) &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['roles', 'assignedTeam', 'active', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'teacherName', 'schoolName', 'className', 'schoolYear', 'updatedAt'])
+            incoming().diff(existing()).affectedKeys().hasOnly(['studentId', 'moetCode', 'studentName', 'roles', 'assignedTeam', 'active', 'permissionStatus', 'securityLockReason', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'teacherName', 'schoolName', 'className', 'schoolYear', 'updatedAt'])
           ) ||
           (
             isSignedIn() &&
@@ -591,47 +722,66 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow get: if isValidId(userId) && (isApprovedTeacher(userId) || isAdmin());
+      allow get: if isValidId(userId) && isApprovedTeacher(userId);
       allow create: if isValidId(userId) && isApprovedTeacher(userId) &&
         isValidUserRoot(incoming(), userId) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
-      allow update: if isValidId(userId) && (isApprovedTeacher(userId) || isAdmin()) &&
+      allow update: if isValidId(userId) && isApprovedTeacher(userId) &&
         isValidUserRoot(incoming(), userId) &&
         incoming().uid == existing().uid &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
         incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'updatedAt']);
 
+      // Kho mã hóa AES-256-GCM lưu Gemini API key cá nhân của riêng giáo viên
+      // Cô lập tuyệt đối: chỉ đúng chủ tài khoản đã phê duyệt (không cho giáo viên khác, quản trị viên hay cán bộ lớp truy cập)
+      match /ai_key_vault/{vaultId} {
+        allow get: if isValidId(userId) && vaultId == 'gemini' && isApprovedTeacher(userId);
+        allow list: if false;
+        allow create: if isValidId(userId) && vaultId == 'gemini' && isApprovedTeacher(userId) &&
+          parentUserExists(userId) &&
+          isValidTeacherAiKeyVault(incoming(), userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isValidId(userId) && vaultId == 'gemini' && isApprovedTeacher(userId) &&
+          isValidTeacherAiKeyVault(incoming(), userId) &&
+          incoming().ownerUid == existing().ownerUid &&
+          incoming().provider == existing().provider &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['alg', 'keyVersion', 'saltB64', 'ivB64', 'authTagB64', 'ciphertextB64', 'maskedHint', 'status', 'lastVerifiedAtMs', 'updatedAtMs', 'updatedAt']);
+        allow delete: if isValidId(userId) && vaultId == 'gemini' && isApprovedTeacher(userId);
+      }
+
       match /class_configs/{configId} {
-        allow get: if isValidId(userId) && isValidId(configId) && (isApprovedTeacher(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(configId) && isApprovedTeacher(userId);
+        allow list: if isApprovedTeacher(userId);
         allow create: if isValidId(userId) && isValidId(configId) && isApprovedTeacher(userId) &&
           parentUserExists(userId) &&
           isValidClassConfig(incoming(), userId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
-        allow update: if isValidId(userId) && isValidId(configId) && (isApprovedTeacher(userId) || isAdmin()) &&
+        allow update: if isValidId(userId) && isValidId(configId) && isApprovedTeacher(userId) &&
           isValidClassConfig(incoming(), userId) &&
           incoming().ownerUid == existing().ownerUid &&
           incoming().createdAt == existing().createdAt &&
           incoming().updatedAt == request.time &&
           (
-            isAdmin() ||
             incoming().diff(existing()).affectedKeys().hasOnly(['teacherName', 'subject', 'schoolName', 'className', 'schoolYear', 'updatedAt']) ||
             incoming().diff(existing()).affectedKeys().hasOnly(['fundBalance', 'updatedAt'])
           );
       }
 
       match /saved_workspaces/{workspaceId} {
-        allow get: if isValidId(userId) && isValidId(workspaceId) && (isApprovedTeacher(userId) || isAdmin());
-        allow list: if isOwner(userId) || isAdmin();
+        allow get: if isValidId(userId) && isValidId(workspaceId) && isApprovedTeacher(userId);
+        allow list: if isApprovedTeacher(userId);
         allow create: if isValidId(userId) && isValidId(workspaceId) && isApprovedTeacher(userId) &&
           parentUserExists(userId) &&
           isValidSavedWorkspace(incoming(), userId) &&
           incoming().createdAt == request.time &&
           incoming().updatedAt == request.time;
-        allow update: if isValidId(userId) && isValidId(workspaceId) && (isApprovedTeacher(userId) || isAdmin()) &&
+        allow update: if isValidId(userId) && isValidId(workspaceId) && isApprovedTeacher(userId) &&
           isValidSavedWorkspace(incoming(), userId) &&
           incoming().ownerUid == existing().ownerUid &&
           incoming().createdAt == existing().createdAt &&
@@ -641,27 +791,55 @@ service cloud.firestore {
 
       match /workspaces/{workspaceId} {
         match /officer_accounts/{studentCode} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isApprovedTeacher(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
           allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidOfficerAccount(incoming(), userId) &&
             incoming().studentCode == studentCode &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isApprovedTeacher(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId) &&
             isValidOfficerAccount(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().studentCode == existing().studentCode &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['studentName', 'team', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'updatedAt']);
-          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isApprovedTeacher(userId) || isAdmin());
+            incoming().diff(existing()).affectedKeys().hasOnly(['studentId', 'moetCode', 'studentName', 'team', 'officerUid', 'authEmail', 'roles', 'assignedTeam', 'active', 'permissionStatus', 'securityLockReason', 'mustChangePassword', 'allowDirectClassAttendance', 'credentialVersion', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId);
+        }
+
+        match /role_assignments/{roleId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(roleId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(roleId) && isApprovedTeacher(userId) &&
+            parentUserExists(userId) &&
+            isValidRoleAssignment(incoming(), userId, roleId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(roleId) && isApprovedTeacher(userId) &&
+            isValidRoleAssignment(incoming(), userId, roleId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().roleId == existing().roleId &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['studentId', 'studentCode', 'moetCode', 'studentName', 'team', 'officerUid', 'nickname', 'status', 'teamMismatchAcknowledged', 'confirmedByEmail', 'confirmedAtMs', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(roleId) && isApprovedTeacher(userId);
+        }
+
+        match /role_assignment_history/{historyId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(historyId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(historyId) && isApprovedTeacher(userId) &&
+            parentUserExists(userId) &&
+            isValidRoleAssignmentHistory(incoming(), userId) &&
+            incoming().createdAt == request.time;
+          allow update, delete: if false;
         }
 
         match /permission_audit_logs/{logId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && (isApprovedTeacher(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
           allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidPermissionAuditLog(incoming(), userId) &&
@@ -671,52 +849,49 @@ service cloud.firestore {
 
         match /students/{studentCode} {
           allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (
-            isOwner(userId) ||
-            isAdmin() ||
+            isApprovedTeacher(userId) ||
             officerHasRole(userId, workspaceId, 'lop_truong') ||
             (officerHasAnyTeamLeaderRole(userId, workspaceId) && resource.data.team == officerMembership().assignedTeam)
           );
-          allow list: if isOwner(userId) ||
-            isAdmin() ||
+          allow list: if isApprovedTeacher(userId) ||
             officerHasRole(userId, workspaceId, 'lop_truong') ||
             (officerHasAnyTeamLeaderRole(userId, workspaceId) && resource.data.team == officerMembership().assignedTeam);
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isOwner(userId) &&
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidStudent(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId) &&
             isValidStudent(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().code == existing().code &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
-            incoming().diff(existing()).affectedKeys().hasOnly(['moetCode', 'fullName', 'gender', 'dob', 'team', 'role', 'secondRole', 'note', 'meritPoints', 'attendancePresent', 'attendanceAbsent', 'updatedAt']);
-          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
+            incoming().diff(existing()).affectedKeys().hasOnly(['moetCode', 'fullName', 'gender', 'dob', 'team', 'rosterOrder', 'role', 'secondRole', 'roles', 'note', 'meritPoints', 'attendancePresent', 'attendanceAbsent', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId);
         }
 
         match /student_pii/{studentCode} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidStudentPii(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId) &&
             isValidStudentPii(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().studentCode == existing().studentCode &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
             incoming().diff(existing()).affectedKeys().hasOnly(['parentName', 'parentPhone', 'updatedAt']);
-          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId);
         }
 
         match /tickets/{ticketId} {
           allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(ticketId) && (
-            isOwner(userId) ||
-            isAdmin() ||
+            isApprovedTeacher(userId) ||
             (
               isWorkspaceOfficer(userId, workspaceId) && (
                 resource.data.submittedByUid == request.auth.uid ||
@@ -726,8 +901,7 @@ service cloud.firestore {
               )
             )
           );
-          allow list: if isOwner(userId) ||
-            isAdmin() ||
+          allow list: if isApprovedTeacher(userId) ||
             (
               isWorkspaceOfficer(userId, workspaceId) && (
                 resource.data.submittedByUid == request.auth.uid ||
@@ -745,7 +919,7 @@ service cloud.firestore {
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time &&
             (
-              isOwner(userId) ||
+              isApprovedTeacher(userId) ||
               officerCanCreateTicketType(userId, workspaceId, incoming().type, incoming().submittedByRole)
             );
           allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(ticketId) &&
@@ -756,12 +930,9 @@ service cloud.firestore {
             incoming().updatedAt == request.time &&
             (
               (
-                (isOwner(userId) || isAdmin()) &&
+                isApprovedTeacher(userId) &&
                 (!(existing().status in ['approved', 'rejected']) || isAdmin()) &&
-                (
-                  isAdmin() ||
-                  incoming().diff(existing()).affectedKeys().hasOnly(['status', 'version', 'approvalId', 'batchApprovalId', 'reviewedByTeacher', 'reviewedByUid', 'reviewedAtMs', 'updatedAt'])
-                )
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'version', 'approvalId', 'batchApprovalId', 'reviewedByTeacher', 'reviewedByUid', 'reviewedAtMs', 'updatedAt'])
               ) ||
               (
                 isWorkspaceOfficer(userId, workspaceId) &&
@@ -780,9 +951,9 @@ service cloud.firestore {
         }
 
         match /audit_logs/{logId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(logId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidAuditLog(incoming(), userId) &&
             incoming().createdAt == request.time;
@@ -791,17 +962,16 @@ service cloud.firestore {
 
         match /attendance/{attendanceId} {
           allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(attendanceId) && (
-            isOwner(userId) ||
-            isAdmin() ||
+            isApprovedTeacher(userId) ||
             officerHasRole(userId, workspaceId, 'lop_truong')
           );
-          allow list: if isOwner(userId) || isAdmin() || officerHasRole(userId, workspaceId, 'lop_truong');
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(attendanceId) && isOwner(userId) &&
+          allow list: if isApprovedTeacher(userId) || officerHasRole(userId, workspaceId, 'lop_truong');
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(attendanceId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidAttendanceRecord(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(attendanceId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(attendanceId) && isApprovedTeacher(userId) &&
             isValidAttendanceRecord(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().createdAt == existing().createdAt &&
@@ -811,55 +981,53 @@ service cloud.firestore {
 
         match /plans/{planId} {
           allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && (
-            isOwner(userId) ||
-            isAdmin() ||
+            isApprovedTeacher(userId) ||
             officerHasRole(userId, workspaceId, 'bi_thu')
           );
-          allow list: if isOwner(userId) || isAdmin() || officerHasRole(userId, workspaceId, 'bi_thu');
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && isOwner(userId) &&
+          allow list: if isApprovedTeacher(userId) || officerHasRole(userId, workspaceId, 'bi_thu');
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidClassPlan(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && isApprovedTeacher(userId) &&
             isValidClassPlan(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'title', 'content', 'targetDate', 'week', 'updatedAt']);
-          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && (isOwner(userId) || isAdmin());
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(planId) && isApprovedTeacher(userId);
         }
 
         match /youth/{activityId} {
           allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && (
-            isOwner(userId) ||
-            isAdmin() ||
+            isApprovedTeacher(userId) ||
             officerHasRole(userId, workspaceId, 'bi_thu')
           );
-          allow list: if isOwner(userId) || isAdmin() || officerHasRole(userId, workspaceId, 'bi_thu');
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && isOwner(userId) &&
+          allow list: if isApprovedTeacher(userId) || officerHasRole(userId, workspaceId, 'bi_thu');
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidYouthActivity(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && isApprovedTeacher(userId) &&
             isValidYouthActivity(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
             incoming().diff(existing()).affectedKeys().hasOnly(['title', 'date', 'participantCount', 'description', 'status', 'updatedAt']);
-          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && (isOwner(userId) || isAdmin());
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(activityId) && isApprovedTeacher(userId);
         }
 
         match /scores/{scoreId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidSubjectScore(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(scoreId) && isApprovedTeacher(userId) &&
             isValidSubjectScore(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().createdAt == existing().createdAt &&
@@ -868,9 +1036,9 @@ service cloud.firestore {
         }
 
         match /vnedu_imports/{importId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(importId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(importId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(importId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(importId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidVneduImportLog(incoming(), userId) &&
             incoming().createdAt == request.time;
@@ -878,14 +1046,14 @@ service cloud.firestore {
         }
 
         match /grade12/{studentCode} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidGrade12Profile(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(studentCode) && isApprovedTeacher(userId) &&
             isValidGrade12Profile(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().studentCode == existing().studentCode &&
@@ -896,17 +1064,16 @@ service cloud.firestore {
 
         match /emulation_standards/{ruleId} {
           allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(ruleId) && (
-            isOwner(userId) ||
-            isAdmin() ||
+            isApprovedTeacher(userId) ||
             officerHasAnyTeamLeaderRole(userId, workspaceId)
           );
-          allow list: if isOwner(userId) || isAdmin() || officerHasAnyTeamLeaderRole(userId, workspaceId);
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(ruleId) && isOwner(userId) &&
+          allow list: if isApprovedTeacher(userId) || officerHasAnyTeamLeaderRole(userId, workspaceId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(ruleId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidEmulationStandards(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(ruleId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(ruleId) && isApprovedTeacher(userId) &&
             isValidEmulationStandards(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().createdAt == existing().createdAt &&
@@ -915,14 +1082,14 @@ service cloud.firestore {
         }
 
         match /emulation_weeks/{weekDocId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidEmulationWeekSnapshot(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isApprovedTeacher(userId) &&
             isValidEmulationWeekSnapshot(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().weekNumber == existing().weekNumber &&
@@ -932,27 +1099,27 @@ service cloud.firestore {
         }
 
         match /emulation_drafts/{weekDocId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidEmulationWeekDraft(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isApprovedTeacher(userId) &&
             isValidEmulationWeekDraft(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().weekNumber == existing().weekNumber &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
             incoming().diff(existing()).affectedKeys().hasOnly(['drafts', 'weekLabel', 'updatedAt']);
-          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && (isOwner(userId) || isAdmin());
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(weekDocId) && isApprovedTeacher(userId);
         }
 
         match /emulation_adjustments/{adjId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(adjId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(adjId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(adjId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(adjId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidEmulationAdjustmentLog(incoming(), userId) &&
             incoming().createdAt == request.time;
@@ -960,31 +1127,31 @@ service cloud.firestore {
         }
 
         match /subject_topics/{topicId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidSubjectTopic(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && isApprovedTeacher(userId) &&
             isValidSubjectTopic(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
             incoming().diff(existing()).affectedKeys().hasOnly(['semester', 'topicName', 'skillName', 'requirement', 'updatedAt']);
-          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && (isOwner(userId) || isAdmin());
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(topicId) && isApprovedTeacher(userId);
         }
 
         match /subject_quick_checks/{checkId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidSubjectQuickCheck(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(checkId) && isApprovedTeacher(userId) &&
             isValidSubjectQuickCheck(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().createdAt == existing().createdAt &&
@@ -993,19 +1160,79 @@ service cloud.firestore {
         }
 
         match /subject_error_logs/{errorId} {
-          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && (isOwner(userId) || isAdmin());
-          allow list: if isOwner(userId) || isAdmin();
-          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && isOwner(userId) &&
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && isApprovedTeacher(userId) &&
             parentUserExists(userId) &&
             isValidSubjectErrorLog(incoming(), userId) &&
             incoming().createdAt == request.time &&
             incoming().updatedAt == request.time;
-          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && (isOwner(userId) || isAdmin()) &&
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(errorId) && isApprovedTeacher(userId) &&
             isValidSubjectErrorLog(incoming(), userId) &&
             incoming().ownerUid == existing().ownerUid &&
             incoming().createdAt == existing().createdAt &&
             incoming().updatedAt == request.time &&
             incoming().diff(existing()).affectedKeys().hasOnly(['status', 'fixedAt', 'note', 'remedy', 'updatedAt']);
+        }
+
+        match /pedagogical_observations/{obsId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(obsId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(obsId) && isApprovedTeacher(userId) &&
+            parentUserExists(userId) &&
+            isValidPedagogicalObservation(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(obsId) && isApprovedTeacher(userId) &&
+            isValidPedagogicalObservation(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().studentId == existing().studentId &&
+            incoming().studentCode == existing().studentCode &&
+            incoming().semester == existing().semester &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['moetCode', 'officialConduct', 'officialAcademic', 'verifiedStrengths', 'verifiedImprovements', 'verifiedAchievements', 'verifiedIncidentNote', 'incidentStatus', 'sourceLabel', 'confirmedByEmail', 'confirmedAtMs', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(obsId) && isApprovedTeacher(userId);
+        }
+
+        match /report_card_comments/{commentId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(commentId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(commentId) && isApprovedTeacher(userId) &&
+            parentUserExists(userId) &&
+            isValidReportCardComment(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(commentId) && isApprovedTeacher(userId) &&
+            isValidReportCardComment(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().studentId == existing().studentId &&
+            incoming().studentCode == existing().studentCode &&
+            incoming().semester == existing().semester &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['moetCode', 'studentName', 'rosterOrder', 'schoolYear', 'lengthMode', 'schoolTemplate', 'maxChars', 'currentDraft', 'teacherEdited', 'status', 'approvedByEmail', 'approvedAtMs', 'versions', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(commentId) && isApprovedTeacher(userId);
+        }
+
+        match /parent_messages/{messageId} {
+          allow get: if isValidId(userId) && isValidId(workspaceId) && isValidId(messageId) && isApprovedTeacher(userId);
+          allow list: if isApprovedTeacher(userId);
+          allow create: if isValidId(userId) && isValidId(workspaceId) && isValidId(messageId) && isApprovedTeacher(userId) &&
+            parentUserExists(userId) &&
+            isValidParentMessage(incoming(), userId) &&
+            incoming().createdAt == request.time &&
+            incoming().updatedAt == request.time;
+          allow update: if isValidId(userId) && isValidId(workspaceId) && isValidId(messageId) && isApprovedTeacher(userId) &&
+            isValidParentMessage(incoming(), userId) &&
+            incoming().ownerUid == existing().ownerUid &&
+            incoming().studentId == existing().studentId &&
+            incoming().studentCode == existing().studentCode &&
+            incoming().semester == existing().semester &&
+            incoming().createdAt == existing().createdAt &&
+            incoming().updatedAt == request.time &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['moetCode', 'studentName', 'recipientName', 'purpose', 'salutation', 'tone', 'incidentStatus', 'currentDraft', 'teacherEdited', 'status', 'approvedByEmail', 'approvedAtMs', 'versions', 'updatedAt']);
+          allow delete: if isValidId(userId) && isValidId(workspaceId) && isValidId(messageId) && isApprovedTeacher(userId);
         }
       }
     }

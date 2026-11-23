@@ -118,6 +118,8 @@ interface MySubjectTabProps {
   onToggleErrorFixedStatus: (errItem: ErrorLogRecord) => void;
   onNavigateToParentComm: (studentId: string) => void;
   onShowToast: (msg: string, type?: 'success' | 'error') => void;
+  geminiKeyConnected?: boolean;
+  onOpenGeminiKeySetup?: () => void;
 }
 
 export function MySubjectTab({
@@ -188,6 +190,8 @@ export function MySubjectTab({
   onToggleErrorFixedStatus,
   onNavigateToParentComm,
   onShowToast,
+  geminiKeyConnected = true,
+  onOpenGeminiKeySetup,
 }: MySubjectTabProps) {
   const [selectedSemester, setSelectedSemester] = useState<VneduSemester>('Học kỳ I');
   const [subjectAiResult, setSubjectAiResult] = useState('');
@@ -333,6 +337,9 @@ Hãy đề xuất:
       });
       const data = await res.json();
       if (!res.ok) {
+        if (data.code === 'GEMINI_KEY_NOT_CONNECTED' || data.code === 'GEMINI_KEY_RECONNECT_REQUIRED') {
+          onOpenGeminiKeySetup?.();
+        }
         throw new Error(data.error || 'Không gọi được dịch vụ Gemini AI trên máy chủ.');
       }
       setSubjectAiResult(data.text || '');
@@ -1221,22 +1228,44 @@ Hãy đề xuất:
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h3 className="font-bold text-sm text-[#102744]">
-                Trợ lý AI Gợi ý Phân nhóm Bài tập & Phụ đạo Môn {classConfig.subject}
+                Trợ lý AI Gợi ý Phân nhóm Bài tập &amp; Phụ đạo Môn {classConfig.subject}
               </h3>
               <p className="text-xs text-slate-500">
-                Tổng hợp từ Bản đồ kiến thức, kết quả kiểm tra nhanh và Sổ tay lỗi sai thực tế.
+                Tổng hợp từ Bản đồ kiến thức, kết quả kiểm tra nhanh và Sổ tay lỗi sai thực tế (dùng Gemini API key cá nhân của bạn).
               </p>
             </div>
             <button
               type="button"
               disabled={isRunningSubjectAi}
-              onClick={handleRunSubjectAi}
+              onClick={geminiKeyConnected ? handleRunSubjectAi : onOpenGeminiKeySetup}
               className="px-4 py-2 rounded-xl bg-[#0C9BA6] hover:bg-teal-700 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5"
             >
               {isRunningSubjectAi ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-              <span>{isRunningSubjectAi ? 'Đang tạo gợi ý...' : 'Tạo gợi ý bài tập bằng AI'}</span>
+              <span>
+                {isRunningSubjectAi
+                  ? 'Đang tạo gợi ý...'
+                  : geminiKeyConnected
+                    ? 'Tạo gợi ý bài tập bằng AI'
+                    : 'Kết nối Gemini AI cá nhân'}
+              </span>
             </button>
           </div>
+          {!geminiKeyConnected && (
+            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+              <span className="text-amber-900">
+                Bạn chưa kết nối Gemini API key cá nhân. Các mục bảng điểm, bản đồ kiến thức, kiểm tra nhanh và sổ tay lỗi sai vẫn hoạt động đầy đủ.
+              </span>
+              {onOpenGeminiKeySetup && (
+                <button
+                  type="button"
+                  onClick={onOpenGeminiKeySetup}
+                  className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold shrink-0"
+                >
+                  Kết nối ngay
+                </button>
+              )}
+            </div>
+          )}
           <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 min-h-[160px] whitespace-pre-wrap text-sm text-slate-800">
             {subjectAiResult || 'Bấm nút "Tạo gợi ý bài tập bằng AI" để nhận phương án phụ đạo cá nhân hóa.'}
           </div>

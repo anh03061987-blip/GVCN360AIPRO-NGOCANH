@@ -93,6 +93,13 @@ export async function signInWithGoogle() {
 }
 
 export async function signOutUser() {
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      window.sessionStorage.clear();
+    }
+  } catch {
+    // Ignore storage errors in restricted iframe environments
+  }
   return firebaseSignOut(auth);
 }
 
@@ -522,6 +529,34 @@ export async function signInOfficerWithNickname(nicknameRaw: string, password: s
 
   try {
     const cred = await signInWithEmailAndPassword(auth, resolvedAuthEmail, password);
+    // Xác minh trực tiếp hồ sơ quyền thật trên Firestore server — chặn ngay tài khoản đã thu hồi / tạm khóa
+    const memSnap = await getDocFromServer(doc(db, 'officer_memberships', cred.user.uid));
+    if (!memSnap.exists()) {
+      await firebaseSignOut(auth);
+      throw new Error(
+        `Tài khoản "${normalized}" chưa có hồ sơ phân quyền hợp lệ hoặc đã bị GVCN thu hồi.`
+      );
+    }
+    const memData = memSnap.data() as {
+      active?: boolean;
+      permissionStatus?: string;
+      securityLockReason?: string;
+      roles?: string[];
+    };
+    if (
+      memData.active !== true ||
+      memData.permissionStatus === 'revoked' ||
+      memData.permissionStatus === 'locked' ||
+      !Array.isArray(memData.roles) ||
+      memData.roles.length === 0
+    ) {
+      await firebaseSignOut(auth);
+      throw new Error(
+        memData.securityLockReason
+          ? `Tài khoản "${normalized}" đang bị khóa bảo mật (${memData.securityLockReason}). Vui lòng liên hệ GVCN.`
+          : `Quyền Cán bộ lớp của tài khoản "${normalized}" hiện đang tạm khóa, chờ kích hoạt hoặc đã bị thu hồi.`
+      );
+    }
     writeClientRateLimit(normalized, null);
     return cred;
   } catch (err) {
@@ -554,6 +589,57 @@ export async function signInOfficerWithNickname(nicknameRaw: string, password: s
     }
     throw new Error(mapFirebaseAuthError(err));
   }
+}
+
+export interface BackendActivationVerifyResponse {
+  ok: boolean;
+  eligible: boolean;
+  checks?: Array<{ step: number; label: string; passed: boolean; detail: string }>;
+  blockingReason?: string;
+  verifiedByBackend?: boolean;
+}
+
+export async function verifyOfficerActivationOnBackend(payload: {
+  workspaceId: string;
+  roleId: OfficerRoleId;
+  studentId: string;
+  accountDocId: string;
+  officerUid: string;
+  nicknameId: string;
+  securityLockVerifiedByGvcn?: boolean;
+}): Promise<BackendActivationVerifyResponse> {
+  try {
+    const headers = await getAuthBearerHeaders();
+    const resp = await fetch('/api/officer/verify-activation', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (isJsonResponse(resp)) {
+      const data = (await resp.json().catch(() => ({}))) as BackendActivationVerifyResponse;
+      if (typeof data.eligible === 'boolean') {
+        return {
+          ...data,
+          verifiedByBackend: true,
+        };
+      }
+    }
+    if (resp.status !== 404 && resp.status !== 405 && resp.status !== 502 && resp.status !== 503) {
+      return {
+        ok: false,
+        eligible: false,
+        blockingReason: `Backend từ chối xác minh kích hoạt (HTTP ${resp.status}).`,
+        verifiedByBackend: true,
+      };
+    }
+  } catch {
+    // Fallback sang kiểm tra trực tiếp bằng getDocFromServer khi bản chia sẻ tĩnh không định tuyến /api
+  }
+  return {
+    ok: true,
+    eligible: true,
+    verifiedByBackend: false,
+  };
 }
 
 export async function changeCurrentOfficerPassword(

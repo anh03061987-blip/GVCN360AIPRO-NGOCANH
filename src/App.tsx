@@ -10,9 +10,11 @@ import {
   onSnapshot,
   serverTimestamp,
   getDoc,
+  getDocFromServer,
   getDocs,
   getDocsFromServer,
   runTransaction,
+  writeBatch,
   query,
   where,
 } from 'firebase/firestore';
@@ -63,6 +65,7 @@ import {
   nicknameToDocId,
   normalizeOfficerNickname,
   provisionOfficerAuthCredential,
+  verifyOfficerActivationOnBackend,
 } from './firebase';
 import {
   DEFAULT_EMULATION_STANDARDS,
@@ -85,9 +88,14 @@ import type {
   OfficerAccountRecord,
   OfficerMembershipRecord,
   OfficerRoleId,
+  ParentMessageRecord,
+  PedagogicalObservationRecord,
   PermissionAuditLogRecord,
   QuickCheckLevel,
   QuickCheckRecord,
+  ReportCardCommentRecord,
+  RoleAssignmentHistoryRecord,
+  RoleAssignmentRecord,
   SavedWorkspace,
   StudentPiiRecord,
   StudentRecord,
@@ -115,6 +123,11 @@ import {
   Grade12Modal,
   StudentModal,
 } from './components/Modals';
+import { RosterOrderUpdateModal } from './components/RosterOrderUpdateModal';
+import {
+  OfficerReconciliationModal,
+  type BatchActivationPositionResult,
+} from './components/OfficerReconciliationModal';
 import {
   AttendanceTab,
   DashboardTab,
@@ -141,6 +154,7 @@ import {
   VneduImportTab,
 } from './components/tabs/OperationsAndReportsTabs';
 import { MySubjectTab, type SubjectSubTab } from './components/tabs/MySubjectTab';
+import { PedagogicalAssistantTab } from './components/tabs/PedagogicalAssistantTab';
 import { LuckyWheelTab } from './components/tabs/LuckyWheelTab';
 import {
   MonitorOverviewTab,
@@ -150,19 +164,44 @@ import {
   MonitorAccountTab,
 } from './components/tabs/MonitorWorkspaceTabs';
 import {
+  GeminiKeySetupPanel,
+  INITIAL_GEMINI_KEY_STATUS,
+  type TeacherGeminiKeyStatus,
+} from './components/GeminiKeySetupPanel';
+import {
+  ROLE_ID_TO_LABEL,
+  VALID_CLASS_OFFICER_ROLES,
+  areRoleListsEqual,
   buildParsedStudentRows,
+  compareStudentsByRosterOrder,
+  detectColumnMappingWarnings,
   detectStudentHeaderAndMapping,
   extractSheetMatrix,
   formatDobToDmy,
+  formatStudentRolesLabel,
   getStudentMoetCode,
+  getStudentRoles,
+  isMissingPlaceholderValue,
+  isValidOfficerRoleId,
+  normalizeNameKey,
   parseDelimitedTextToMatrix,
+  parseExcelStudentRoles,
+  parsePositiveIntStt,
   readStudentWorkbook,
   reconcileStudentImportRows,
+  studentRolesToLegacyFields,
   type LegacyResolutionAction,
   type ParsedStudentRow,
+  type RosterOrderReconciliationAnalysis,
   type StudentColumnMapping,
   type StudentExcelColumnKey,
 } from './utils/studentExcelImport';
+import {
+  analyzeOfficerPositionsAndAccounts,
+  evaluateEightPointActivationCheck,
+  validateOfficerReconciliationDraft,
+  type OfficerLiveMembershipStatus,
+} from './utils/officerReconciliation';
 import {
   autoDetectVneduHeaderAndMapping,
   buildAutoReconcileBatch,
@@ -216,10 +255,16 @@ export default function App() {
   const [officerMembershipLoading, setOfficerMembershipLoading] = useState(false);
   const [showOfficerChangePasswordModal, setShowOfficerChangePasswordModal] = useState(false);
   const [officerAccounts, setOfficerAccounts] = useState<OfficerAccountRecord[]>([]);
+  const [roleAssignments, setRoleAssignments] = useState<RoleAssignmentRecord[]>([]);
+  const [roleAssignmentHistory, setRoleAssignmentHistory] = useState<RoleAssignmentHistoryRecord[]>([]);
+  const [showOfficerReconciliationModal, setShowOfficerReconciliationModal] = useState(false);
   const [officerLoginStatusMap, setOfficerLoginStatusMap] = useState<
-    Record<string, { lastLoginAtMs?: number; mustChangePassword?: boolean }>
+    Record<string, OfficerLiveMembershipStatus>
   >({});
   const [permissionAuditLogs, setPermissionAuditLogs] = useState<PermissionAuditLogRecord[]>([]);
+  const [geminiKeyStatus, setGeminiKeyStatus] = useState<TeacherGeminiKeyStatus>(INITIAL_GEMINI_KEY_STATUS);
+  const [showGeminiKeyModal, setShowGeminiKeyModal] = useState(false);
+  const [geminiStep2DismissedUid, setGeminiStep2DismissedUid] = useState<string | null>(null);
   const previousAuthUidRef = useRef<string | null>(null);
   const recordedOfficerLoginUidRef = useRef<string | null>(null);
 
@@ -296,6 +341,13 @@ export default function App() {
   const [subjectScores, setSubjectScores] = useState<Record<string, SubjectScoreRecord>>({});
   const [vneduImportHistory, setVneduImportHistory] = useState<VneduImportLog[]>([]);
   const [grade12Profiles, setGrade12Profiles] = useState<Record<string, Grade12Profile>>({});
+  const [pedagogicalObservationsMap, setPedagogicalObservationsMap] = useState<
+    Record<string, PedagogicalObservationRecord>
+  >({});
+  const [reportCardCommentsMap, setReportCardCommentsMap] = useState<
+    Record<string, ReportCardCommentRecord>
+  >({});
+  const [parentMessagesMap, setParentMessagesMap] = useState<Record<string, ParentMessageRecord>>({});
 
   // 5. Phân hệ Thi đua A/B/C
   const [emulationStandards, setEmulationStandards] = useState<EmulationStandards>(DEFAULT_EMULATION_STANDARDS);
@@ -356,6 +408,8 @@ export default function App() {
     note: '',
   });
   const [showBulkStudentModal, setShowBulkStudentModal] = useState(false);
+  const [showRosterOrderModal, setShowRosterOrderModal] = useState(false);
+  const [isApplyingRosterOrder, setIsApplyingRosterOrder] = useState(false);
   const [bulkWorkbook, setBulkWorkbook] = useState<XLSX.WorkBook | null>(null);
   const [bulkFileName, setBulkFileName] = useState('');
   const [bulkSheetNames, setBulkSheetNames] = useState<string[]>([]);
@@ -597,6 +651,9 @@ export default function App() {
     setAiAnalysisResult('');
     setGeneratedMessage('');
     setGeneratedReportCardDraft('');
+    setPedagogicalObservationsMap({});
+    setReportCardCommentsMap({});
+    setParentMessagesMap({});
     setActiveRoleId('gvcn');
     setActiveTab('dashboard');
     setAdminTeacherRequests([]);
@@ -604,10 +661,38 @@ export default function App() {
     setOfficerMembershipLoading(false);
     setShowOfficerChangePasswordModal(false);
     setOfficerAccounts([]);
+    setRoleAssignments([]);
+    setRoleAssignmentHistory([]);
+    setShowOfficerReconciliationModal(false);
     setOfficerLoginStatusMap({});
     setPermissionAuditLogs([]);
+    setGeminiKeyStatus(INITIAL_GEMINI_KEY_STATUS);
+    setShowGeminiKeyModal(false);
+    setGeminiStep2DismissedUid(null);
+    setShowBulkStudentModal(false);
+    setBulkWorkbook(null);
+    setBulkFileName('');
+    setBulkSheetNames([]);
+    setBulkSelectedSheet('');
+    setBulkHeaders([]);
+    setBulkDataRows([]);
+    setBulkStudentText('');
+    setVneduDeselectedRows({});
+    setEditingStudent(null);
+    setToast(null);
     recordedOfficerLoginUidRef.current = null;
     seededTopicsRef.current = {};
+  };
+
+  // Đăng xuất an toàn: xóa sạch 100% dữ liệu lớp học & phiên cũ khỏi bộ nhớ trình duyệt
+  const handleSignOut = async () => {
+    resetSensitiveSessionState();
+    try {
+      sessionStorage.clear();
+    } catch {
+      // Bỏ qua nếu môi trường iframe giới hạn sessionStorage
+    }
+    await signOutUser();
   };
 
   // Kiểm tra kết nối Firestore & lắng nghe đăng nhập Firebase Auth (Giáo viên Google & Cán bộ lớp)
@@ -696,6 +781,72 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Bước 2: Kiểm tra trạng thái Gemini API key cá nhân (CHỈ dành cho Giáo viên đã duyệt, TUYỆT ĐỐI không chạy cho Cán bộ lớp)
+  useEffect(() => {
+    if (!user || sessionKind !== 'teacher' || teacherAccessState !== 'approved' || !userRootReady) {
+      setGeminiKeyStatus(INITIAL_GEMINI_KEY_STATUS);
+      return;
+    }
+
+    let cancelled = false;
+    setGeminiKeyStatus((prev) => ({ ...prev, loading: true }));
+
+    (async () => {
+      try {
+        const headers = await getAuthBearerHeaders();
+        const resp = await fetch('/api/teacher/gemini-key/status', {
+          method: 'GET',
+          headers,
+        });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        const data = (await resp.json()) as {
+          connected?: boolean;
+          status?: 'connected' | 'not_connected' | 'needs_reconnect';
+          maskedHint?: string;
+          lastVerifiedAtMs?: number | null;
+          updatedAtMs?: number | null;
+          usingDedicatedVaultSecret?: boolean;
+          encryptionKeyVersion?: 'v1-env' | 'v1-fallback' | null;
+          isProduction?: boolean;
+          message?: string;
+        };
+        if (cancelled) return;
+        setGeminiKeyStatus({
+          loading: false,
+          loaded: true,
+          connected: Boolean(data.connected),
+          status: data.status || (data.connected ? 'connected' : 'not_connected'),
+          maskedHint: data.maskedHint || '',
+          lastVerifiedAtMs: data.lastVerifiedAtMs ?? null,
+          updatedAtMs: data.updatedAtMs ?? null,
+          usingDedicatedVaultSecret: Boolean(data.usingDedicatedVaultSecret),
+          encryptionKeyVersion: data.encryptionKeyVersion ?? null,
+          isProduction: Boolean(data.isProduction),
+          message: data.message,
+        });
+      } catch {
+        if (cancelled) return;
+        setGeminiKeyStatus({
+          loading: false,
+          loaded: true,
+          connected: false,
+          status: 'not_connected',
+          maskedHint: '',
+          lastVerifiedAtMs: null,
+          updatedAtMs: null,
+          usingDedicatedVaultSecret: false,
+          message: 'Không thể tải trạng thái Gemini AI cá nhân. Bạn vẫn có thể quản lý lớp học bình thường.',
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, sessionKind, teacherAccessState, userRootReady]);
+
   // Lắng nghe hồ sơ quyền thực tế của Cán bộ lớp từ officer_memberships/{uid}
   useEffect(() => {
     if (!user || sessionKind !== 'officer') return;
@@ -780,7 +931,7 @@ export default function App() {
     return () => unsubMem();
   }, [user, sessionKind]);
 
-  // GVCN tải trạng thái đăng nhập gần nhất (lastLoginAtMs) từ officer_memberships/{uid}
+  // GVCN tải trạng thái thực tế từ officer_memberships/{uid} (chỉ đọc, không tự sửa dữ liệu)
   useEffect(() => {
     if (!user || sessionKind !== 'teacher' || officerAccounts.length === 0) {
       setOfficerLoginStatusMap({});
@@ -797,15 +948,25 @@ export default function App() {
               return [
                 acc.officerUid,
                 {
+                  exists: true,
+                  active: Boolean(d.active),
+                  studentCode: d.studentCode,
+                  studentId: d.studentId,
+                  moetCode: d.moetCode,
+                  roles: Array.isArray(d.roles) ? d.roles : [],
+                  assignedTeam: typeof d.assignedTeam === 'number' ? d.assignedTeam : 0,
+                  permissionStatus: d.permissionStatus,
+                  securityLockReason: d.securityLockReason || '',
                   lastLoginAtMs: typeof d.lastLoginAtMs === 'number' ? d.lastLoginAtMs : undefined,
                   mustChangePassword: Boolean(d.mustChangePassword),
-                },
+                } satisfies OfficerLiveMembershipStatus,
               ] as const;
             }
+            return [acc.officerUid, { exists: false } satisfies OfficerLiveMembershipStatus] as const;
           } catch {
-            // Bỏ qua nếu membership đã bị xóa
+            // Bỏ qua nếu membership không thể đọc
+            return [acc.officerUid, { exists: false } satisfies OfficerLiveMembershipStatus] as const;
           }
-          return [acc.officerUid, {}] as const;
         })
       );
       if (!cancelled) {
@@ -816,6 +977,17 @@ export default function App() {
       cancelled = true;
     };
   }, [user, sessionKind, officerAccounts]);
+
+  const officerGovernance = useMemo(
+    () =>
+      analyzeOfficerPositionsAndAccounts({
+        students,
+        officerAccounts,
+        roleAssignments,
+        officerLoginStatusMap,
+      }),
+    [students, officerAccounts, roleAssignments, officerLoginStatusMap]
+  );
 
   // Tự động đưa Cán bộ lớp về tab hợp lệ được cấp quyền
   useEffect(() => {
@@ -851,7 +1023,7 @@ export default function App() {
               id: d.id,
               ...(d.data() as Omit<StudentRecord, 'id'>),
             }));
-            list.sort((a, b) => (a.code || '').localeCompare(b.code || ''));
+            list.sort(compareStudentsByRosterOrder);
             setStudents(list);
           },
           (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/students`)
@@ -866,7 +1038,7 @@ export default function App() {
               id: d.id,
               ...(d.data() as Omit<StudentRecord, 'id'>),
             }));
-            list.sort((a, b) => (a.code || '').localeCompare(b.code || ''));
+            list.sort(compareStudentsByRosterOrder);
             setStudents(list);
           },
           (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/students`)
@@ -1411,7 +1583,7 @@ export default function App() {
       studentsColRef,
       (snapshot) => {
         const list = snapshot.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<StudentRecord, 'id'>) }));
-        list.sort((a, b) => (a.code || '').localeCompare(b.code || ''));
+        list.sort(compareStudentsByRosterOrder);
         setStudents(list);
       },
       (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/students`)
@@ -1722,6 +1894,111 @@ export default function App() {
       (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/permission_audit_logs`)
     );
 
+    // 13. Bảng phân công 7 vị trí chính thức (role_assignments) & Lịch sử bất biến (role_assignment_history)
+    const roleAssignmentsColRef = collection(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'role_assignments'
+    );
+    const unsubRoleAssignments = onSnapshot(
+      roleAssignmentsColRef,
+      (snapshot) => {
+        const list = snapshot.docs
+          .filter((d) => isValidOfficerRoleId(d.id))
+          .map((d) => ({
+            ...(d.data() as Omit<RoleAssignmentRecord, 'id'>),
+            id: d.id as OfficerRoleId,
+          }));
+        setRoleAssignments(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/role_assignments`)
+    );
+
+    const roleHistoryColRef = collection(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'role_assignment_history'
+    );
+    const unsubRoleHistory = onSnapshot(
+      roleHistoryColRef,
+      (snapshot) => {
+        const list = snapshot.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as Omit<RoleAssignmentHistoryRecord, 'id'>),
+        }));
+        list.sort((a, b) => (b.changedAtMs || 0) - (a.changedAtMs || 0));
+        setRoleAssignmentHistory(list);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/role_assignment_history`)
+    );
+
+    // Trợ lý Nhận xét Sư phạm AI (chỉ GVCN)
+    const pedObsColRef = collection(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'pedagogical_observations'
+    );
+    const unsubPedObs = onSnapshot(
+      pedObsColRef,
+      (snapshot) => {
+        const map: Record<string, PedagogicalObservationRecord> = {};
+        snapshot.docs.forEach((d) => {
+          map[d.id] = { id: d.id, ...(d.data() as Omit<PedagogicalObservationRecord, 'id'>) };
+        });
+        setPedagogicalObservationsMap(map);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/pedagogical_observations`)
+    );
+
+    const rcCommentsColRef = collection(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'report_card_comments'
+    );
+    const unsubRcComments = onSnapshot(
+      rcCommentsColRef,
+      (snapshot) => {
+        const map: Record<string, ReportCardCommentRecord> = {};
+        snapshot.docs.forEach((d) => {
+          map[d.id] = { id: d.id, ...(d.data() as Omit<ReportCardCommentRecord, 'id'>) };
+        });
+        setReportCardCommentsMap(map);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/report_card_comments`)
+    );
+
+    const parentMsgColRef = collection(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'parent_messages'
+    );
+    const unsubParentMsgs = onSnapshot(
+      parentMsgColRef,
+      (snapshot) => {
+        const map: Record<string, ParentMessageRecord> = {};
+        snapshot.docs.forEach((d) => {
+          map[d.id] = { id: d.id, ...(d.data() as Omit<ParentMessageRecord, 'id'>) };
+        });
+        setParentMessagesMap(map);
+      },
+      (err) => handleFirestoreError(err, OperationType.LIST, `${wsPath}/parent_messages`)
+    );
+
     return () => {
       unsubStudents();
       unsubTickets();
@@ -1741,6 +2018,11 @@ export default function App() {
       unsubErrorLogs();
       unsubOfficerAccounts();
       unsubPermAuditLogs();
+      unsubRoleAssignments();
+      unsubRoleHistory();
+      unsubPedObs();
+      unsubRcComments();
+      unsubParentMsgs();
     };
   }, [
     user,
@@ -1975,6 +2257,8 @@ export default function App() {
 
     const cleanMoet = (studentForm.moetCode || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
     const normalizedDob = formatDobToDmy(studentForm.dob);
+    const nextRoles = [studentForm.role, studentForm.secondRole || ''].filter(isValidOfficerRoleId);
+    const roleFields = studentRolesToLegacyFields(nextRoles);
 
     try {
       const stRef = doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'students', cleanCode);
@@ -1982,18 +2266,29 @@ export default function App() {
       const existingSt = await getDoc(stRef);
 
       if (existingSt.exists()) {
+        const oldRoles = getStudentRoles(existingSt.data() as StudentRecord);
         await updateDoc(stRef, {
           moetCode: cleanMoet || (/^\d{10}$/.test(cleanCode) ? cleanCode : ''),
           fullName: studentForm.fullName.trim(),
           gender: studentForm.gender,
           dob: normalizedDob,
           team: Number(studentForm.team),
-          role: studentForm.role,
-          secondRole: studentForm.secondRole || '',
+          role: roleFields.role,
+          secondRole: roleFields.secondRole,
+          roles: roleFields.roles,
           note: studentForm.note || '',
           meritPoints: editingStudent?.meritPoints ?? 100,
           updatedAt: serverTimestamp(),
         });
+        if (!areRoleListsEqual(oldRoles, roleFields.roles)) {
+          await appendPermissionAuditLog({
+            action: 'Cập nhật chức vụ học sinh',
+            nickname: 'profile',
+            studentCode: cleanCode,
+            studentName: studentForm.fullName.trim(),
+            details: `Cập nhật chức vụ trong lớp từ "${formatStudentRolesLabel(oldRoles)}" thành "${formatStudentRolesLabel(roleFields.roles)}".`,
+          }).catch(() => {});
+        }
       } else {
         await setDoc(stRef, {
           ownerUid: user.uid,
@@ -2003,8 +2298,9 @@ export default function App() {
           gender: studentForm.gender,
           dob: normalizedDob,
           team: Number(studentForm.team),
-          role: studentForm.role,
-          secondRole: studentForm.secondRole || '',
+          role: roleFields.role,
+          secondRole: roleFields.secondRole,
+          roles: roleFields.roles,
           note: studentForm.note || '',
           meritPoints: 100,
           attendancePresent: 0,
@@ -2014,19 +2310,26 @@ export default function App() {
         });
       }
 
+      const sanitizedParentName = isMissingPlaceholderValue(studentForm.parentName)
+        ? ''
+        : studentForm.parentName.trim();
+      const sanitizedParentPhone = isMissingPlaceholderValue(studentForm.parentPhone)
+        ? ''
+        : studentForm.parentPhone.trim();
+
       const existingPii = await getDoc(piiRef);
       if (existingPii.exists()) {
         await updateDoc(piiRef, {
-          parentName: studentForm.parentName.trim(),
-          parentPhone: studentForm.parentPhone.trim(),
+          parentName: sanitizedParentName,
+          parentPhone: sanitizedParentPhone,
           updatedAt: serverTimestamp(),
         });
       } else {
         await setDoc(piiRef, {
           ownerUid: user.uid,
           studentCode: cleanCode,
-          parentName: studentForm.parentName.trim(),
-          parentPhone: studentForm.parentPhone.trim(),
+          parentName: sanitizedParentName,
+          parentPhone: sanitizedParentPhone,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -2037,6 +2340,108 @@ export default function App() {
       showToast(editingStudent ? 'Đã cập nhật hồ sơ học sinh!' : 'Đã thêm học sinh mới vào lớp!');
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}/workspaces/${classWorkspaceId}/students/${cleanCode}`);
+    }
+  };
+
+  const handleQuickUpdateStudentRoles = async (payload: {
+    student: StudentRecord;
+    nextTeam: number;
+    nextRoles: OfficerRoleId[];
+    replaceHolders?: { student: StudentRecord; roleToRemove: OfficerRoleId }[];
+  }) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      showToast('Chỉ Giáo viên chủ nhiệm mới có quyền chỉnh sửa chức vụ học sinh.', 'error');
+      return;
+    }
+
+    const oldRoles = getStudentRoles(payload.student);
+    const oldTeam = Number(payload.student.team) || 1;
+    const roleFields = studentRolesToLegacyFields(payload.nextRoles);
+
+    try {
+      const targetRef = doc(
+        db,
+        'users',
+        user.uid,
+        'workspaces',
+        classWorkspaceId,
+        'students',
+        payload.student.id
+      );
+
+      await updateDoc(targetRef, {
+        team: Number(payload.nextTeam),
+        role: roleFields.role,
+        secondRole: roleFields.secondRole,
+        roles: roleFields.roles,
+        updatedAt: serverTimestamp(),
+      });
+
+      const oldDesc = `${formatStudentRolesLabel(oldRoles)} (Tổ ${oldTeam})`;
+      const newDesc = `${formatStudentRolesLabel(roleFields.roles)} (Tổ ${payload.nextTeam})`;
+      await appendPermissionAuditLog({
+        action:
+          roleFields.roles.length === 0
+            ? 'Thu hồi chức vụ trong lớp'
+            : oldRoles.length === 0
+              ? 'Giao chức vụ trong lớp'
+              : 'Cập nhật chức vụ trong lớp',
+        nickname: 'profile',
+        studentCode: payload.student.code || payload.student.id,
+        studentName: payload.student.fullName,
+        details: `GVCN điều chỉnh chức vụ cho ${payload.student.fullName}: ${oldDesc} → ${newDesc}.`,
+      }).catch(() => {});
+
+      // Chỉ chuyển chức vụ của học sinh cũ khi GVCN chủ động tick xác nhận thay thế
+      if (payload.replaceHolders && payload.replaceHolders.length > 0) {
+        const removalsByStudentId = new Map<string, { student: StudentRecord; rolesToRemove: Set<OfficerRoleId> }>();
+        for (const item of payload.replaceHolders) {
+          const entry = removalsByStudentId.get(item.student.id) || {
+            student: item.student,
+            rolesToRemove: new Set<OfficerRoleId>(),
+          };
+          entry.rolesToRemove.add(item.roleToRemove);
+          removalsByStudentId.set(item.student.id, entry);
+        }
+
+        for (const { student: holder, rolesToRemove } of removalsByStudentId.values()) {
+          const holderOldRoles = getStudentRoles(holder);
+          const holderNextRoles = holderOldRoles.filter((r) => !rolesToRemove.has(r));
+          const holderFields = studentRolesToLegacyFields(holderNextRoles);
+          const holderRef = doc(
+            db,
+            'users',
+            user.uid,
+            'workspaces',
+            classWorkspaceId,
+            'students',
+            holder.id
+          );
+          await updateDoc(holderRef, {
+            role: holderFields.role,
+            secondRole: holderFields.secondRole,
+            roles: holderFields.roles,
+            updatedAt: serverTimestamp(),
+          });
+          await appendPermissionAuditLog({
+            action: 'Chuyển giao chức vụ trong lớp',
+            nickname: 'profile',
+            studentCode: holder.code || holder.id,
+            studentName: holder.fullName,
+            details: `Chuyển giao chức vụ sang ${payload.student.fullName}: ${holder.fullName} đổi từ "${formatStudentRolesLabel(holderOldRoles)}" thành "${formatStudentRolesLabel(holderFields.roles)}".`,
+          }).catch(() => {});
+        }
+      }
+
+      showToast(
+        `Đã cập nhật chức vụ cho ${payload.student.fullName}: ${formatStudentRolesLabel(roleFields.roles)}.`
+      );
+    } catch (err) {
+      handleFirestoreError(
+        err,
+        OperationType.UPDATE,
+        `users/${user.uid}/workspaces/${classWorkspaceId}/students/${payload.student.id}`
+      );
     }
   };
 
@@ -2125,7 +2530,7 @@ export default function App() {
         {
           ownerUid: user.uid,
           action: payload.action.slice(0, 80),
-          nickname: payload.nickname.slice(0, 60),
+          nickname: payload.nickname.slice(0, 40),
           studentCode: payload.studentCode.slice(0, 40),
           studentName: payload.studentName.slice(0, 150),
           details: payload.details.slice(0, 600),
@@ -2202,6 +2607,8 @@ export default function App() {
       updatedAt: serverTimestamp(),
     });
 
+    const studentMoet = getStudentMoetCode(payload.student);
+
     await setDoc(doc(db, 'officer_memberships', officerUid), {
       officerUid,
       teacherUid: user.uid,
@@ -2211,6 +2618,8 @@ export default function App() {
       schoolYear: (classConfig.schoolYear || '2026–2027').slice(0, 50),
       teacherName: (classConfig.teacherName || user.displayName || 'GVCN').slice(0, 120),
       studentCode: payload.student.code.slice(0, 40),
+      studentId: payload.student.id.slice(0, 40),
+      moetCode: studentMoet.slice(0, 40),
       studentName: payload.student.fullName.slice(0, 150),
       nickname: cleanNickname,
       nicknameId: nickId,
@@ -2218,6 +2627,8 @@ export default function App() {
       assignedTeam,
       allowDirectClassAttendance: allowDirectAttendance,
       active: true,
+      permissionStatus: 'active',
+      securityLockReason: '',
       mustChangePassword: Boolean(payload.mustChangePassword),
       credentialVersion: 1,
       createdAt: serverTimestamp(),
@@ -2229,6 +2640,8 @@ export default function App() {
       {
         ownerUid: user.uid,
         studentCode: payload.student.code.slice(0, 40),
+        studentId: payload.student.id.slice(0, 40),
+        moetCode: studentMoet.slice(0, 40),
         studentName: payload.student.fullName.slice(0, 150),
         team: Number(payload.student.team) || 1,
         nickname: cleanNickname,
@@ -2239,12 +2652,50 @@ export default function App() {
         assignedTeam,
         allowDirectClassAttendance: allowDirectAttendance,
         active: true,
+        permissionStatus: 'active',
+        securityLockReason: '',
         mustChangePassword: Boolean(payload.mustChangePassword),
         credentialVersion: 1,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       }
     );
+
+    // Nếu học sinh đã được chốt ở bảng role_assignments chính thức, gắn officerUid & nickname tương ứng
+    for (const r of uniqueRoles) {
+      const existingRa = roleAssignments.find(
+        (ra) => ra.roleId === r && ra.studentId === payload.student.id
+      );
+      if (existingRa) {
+        await updateDoc(
+          doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'role_assignments', r),
+          {
+            officerUid,
+            nickname: cleanNickname,
+            status: 'active',
+            updatedAt: serverTimestamp(),
+          }
+        ).catch(() => {});
+      }
+    }
+
+    // Đồng bộ chức vụ tương ứng lên hồ sơ học sinh trong Danh sách lớp
+    const syncedProfileFields = studentRolesToLegacyFields(uniqueRoles);
+    const stProfileRef = doc(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'students',
+      payload.student.id
+    );
+    await updateDoc(stProfileRef, {
+      role: syncedProfileFields.role,
+      secondRole: syncedProfileFields.secondRole,
+      roles: syncedProfileFields.roles,
+      updatedAt: serverTimestamp(),
+    }).catch(() => {});
 
     const roleTitles = uniqueRoles.map((r) => ROLES.find((x) => x.id === r)?.title || r).join(' + ');
     await appendPermissionAuditLog({
@@ -2297,6 +2748,23 @@ export default function App() {
       }
     );
 
+    // Đồng bộ chức vụ mới lên hồ sơ học sinh trong Danh sách lớp
+    const matchedStudentDoc = students.find(
+      (s) => s.code === account.studentCode || s.id === account.studentCode
+    );
+    if (matchedStudentDoc) {
+      const syncedProfileFields = studentRolesToLegacyFields(uniqueRoles);
+      await updateDoc(
+        doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'students', matchedStudentDoc.id),
+        {
+          role: syncedProfileFields.role,
+          secondRole: syncedProfileFields.secondRole,
+          roles: syncedProfileFields.roles,
+          updatedAt: serverTimestamp(),
+        }
+      ).catch(() => {});
+    }
+
     const roleTitles = uniqueRoles.map((r) => ROLES.find((x) => x.id === r)?.title || r).join(' + ');
     await appendPermissionAuditLog({
       action: 'Cập nhật vai trò',
@@ -2344,18 +2812,28 @@ export default function App() {
   const handleToggleOfficerLock = async (account: OfficerAccountRecord) => {
     if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) return;
     const nextActive = !account.active;
+    const liveMem = officerLoginStatusMap[account.officerUid];
+    const lockReason = (liveMem?.securityLockReason || account.securityLockReason || '').trim();
+    if (nextActive && lockReason) {
+      throw new Error(
+        `Tài khoản ${account.nickname} đang bị khóa vì lý do bảo mật ("${lockReason}"). Vui lòng mở màn hình "RÀ SOÁT VÀ ĐỒNG BỘ CÁN BỘ LỚP" để GVCN xác minh trực tiếp trước khi kích hoạt lại.`
+      );
+    }
+    const nextPermStatus = nextActive ? 'active' : 'locked';
     await updateDoc(doc(db, 'officer_directory', account.nicknameId), {
       active: nextActive,
       updatedAt: serverTimestamp(),
     });
     await updateDoc(doc(db, 'officer_memberships', account.officerUid), {
       active: nextActive,
+      permissionStatus: nextPermStatus,
       updatedAt: serverTimestamp(),
     });
     await updateDoc(
       doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'officer_accounts', account.studentCode),
       {
         active: nextActive,
+        permissionStatus: nextPermStatus,
         updatedAt: serverTimestamp(),
       }
     );
@@ -2399,6 +2877,18 @@ export default function App() {
     const newOfficerUid = provisioned.officerUid;
     const nextAuthEmail = provisioned.authEmail;
 
+    const matchedStForReset = students.find(
+      (s) =>
+        s.id === account.studentId ||
+        s.code === account.studentCode ||
+        s.id === account.studentCode
+    );
+    const resolvedStudentId = (account.studentId || matchedStForReset?.id || '').slice(0, 40);
+    const resolvedMoetCode = (
+      account.moetCode ||
+      (matchedStForReset ? getStudentMoetCode(matchedStForReset) : '')
+    ).slice(0, 40);
+
     await setDoc(doc(db, 'officer_memberships', newOfficerUid), {
       officerUid: newOfficerUid,
       teacherUid: user.uid,
@@ -2408,6 +2898,8 @@ export default function App() {
       schoolYear: (classConfig.schoolYear || '2026–2027').slice(0, 50),
       teacherName: (classConfig.teacherName || user.displayName || 'GVCN').slice(0, 120),
       studentCode: account.studentCode,
+      ...(resolvedStudentId ? { studentId: resolvedStudentId } : {}),
+      ...(resolvedMoetCode ? { moetCode: resolvedMoetCode } : {}),
       studentName: account.studentName,
       nickname: account.nickname,
       nicknameId: account.nicknameId,
@@ -2415,6 +2907,8 @@ export default function App() {
       assignedTeam: account.assignedTeam,
       allowDirectClassAttendance: Boolean(account.allowDirectClassAttendance),
       active: account.active,
+      permissionStatus: account.permissionStatus || (account.active ? 'active' : 'locked'),
+      securityLockReason: account.securityLockReason || '',
       mustChangePassword: Boolean(mustChangePassword),
       credentialVersion: nextVersion,
       createdAt: serverTimestamp(),
@@ -2438,6 +2932,20 @@ export default function App() {
         updatedAt: serverTimestamp(),
       }
     );
+
+    // Cập nhật officerUid mới trên bảng role_assignments nếu tài khoản này đang giữ vị trí chính thức
+    for (const ra of roleAssignments) {
+      if (ra.officerUid === account.officerUid || (resolvedStudentId && ra.studentId === resolvedStudentId)) {
+        await updateDoc(
+          doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'role_assignments', ra.roleId),
+          {
+            officerUid: newOfficerUid,
+            nickname: account.nickname,
+            updatedAt: serverTimestamp(),
+          }
+        ).catch(() => {});
+      }
+    }
 
     if (account.officerUid && account.officerUid !== newOfficerUid) {
       await updateDoc(doc(db, 'officer_memberships', account.officerUid), {
@@ -2494,6 +3002,580 @@ export default function App() {
       details: `Thu hồi toàn bộ quyền và xóa tài khoản ${account.nickname} của ${account.studentName}.`,
     });
     showToast(`Đã thu hồi và xóa tài khoản ${account.nickname}.`);
+  };
+
+  // Tạm khóa quyền có ghi lý do (bảo mật hoặc tạm nghỉ) — không xóa tài khoản hay hồ sơ học sinh
+  const handleLockOfficerWithReason = async (account: OfficerAccountRecord, reason: string) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      throw new Error('Chỉ GVCN mới có quyền tạm khóa tài khoản cán bộ lớp.');
+    }
+    const cleanReason = reason.trim().slice(0, 300);
+    await updateDoc(doc(db, 'officer_directory', account.nicknameId), {
+      active: false,
+      updatedAt: serverTimestamp(),
+    }).catch(() => {});
+    await updateDoc(doc(db, 'officer_memberships', account.officerUid), {
+      active: false,
+      permissionStatus: 'locked',
+      securityLockReason: cleanReason,
+      updatedAt: serverTimestamp(),
+    }).catch(() => {});
+    await updateDoc(
+      doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'officer_accounts', account.studentCode),
+      {
+        active: false,
+        permissionStatus: 'locked',
+        securityLockReason: cleanReason,
+        updatedAt: serverTimestamp(),
+      }
+    );
+    for (const ra of roleAssignments) {
+      if (
+        ra.officerUid === account.officerUid ||
+        (account.studentId && ra.studentId === account.studentId)
+      ) {
+        await updateDoc(
+          doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'role_assignments', ra.roleId),
+          {
+            status: 'locked',
+            updatedAt: serverTimestamp(),
+          }
+        ).catch(() => {});
+      }
+    }
+    await appendPermissionAuditLog({
+      action: cleanReason ? 'Khóa bảo mật tài khoản' : 'Tạm khóa quyền tài khoản',
+      nickname: account.nickname,
+      studentCode: account.studentCode,
+      studentName: account.studentName,
+      details: cleanReason
+        ? `GVCN tạm khóa quyền ${account.nickname} với lý do bảo mật: ${cleanReason}.`
+        : `GVCN tạm khóa quyền đăng nhập của ${account.nickname}.`,
+    });
+    showToast(`Đã tạm khóa quyền tài khoản ${account.nickname}.`);
+  };
+
+  // Thu hồi chức vụ (ngắt quyền ngay, lưu role_assignment_history bất biến, không xóa hồ sơ HS)
+  const handleRevokeOfficerPosition = async (account: OfficerAccountRecord, reason?: string) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      throw new Error('Chỉ GVCN mới có quyền thu hồi chức vụ cán bộ lớp.');
+    }
+    const cleanReason = (reason || 'GVCN thu hồi chức vụ cán bộ lớp').slice(0, 300);
+    await updateDoc(doc(db, 'officer_directory', account.nicknameId), {
+      active: false,
+      updatedAt: serverTimestamp(),
+    }).catch(() => {});
+    await updateDoc(doc(db, 'officer_memberships', account.officerUid), {
+      active: false,
+      permissionStatus: 'revoked',
+      updatedAt: serverTimestamp(),
+    }).catch(() => {});
+    await updateDoc(
+      doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'officer_accounts', account.studentCode),
+      {
+        active: false,
+        permissionStatus: 'revoked',
+        updatedAt: serverTimestamp(),
+      }
+    );
+
+    const nowMs = Date.now();
+    for (const ra of roleAssignments) {
+      if (
+        ra.officerUid === account.officerUid ||
+        (account.studentId && ra.studentId === account.studentId) ||
+        ra.studentCode === account.studentCode
+      ) {
+        await updateDoc(
+          doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'role_assignments', ra.roleId),
+          {
+            status: 'revoked',
+            updatedAt: serverTimestamp(),
+          }
+        ).catch(() => {});
+        await addDoc(
+          collection(
+            db,
+            'users',
+            user.uid,
+            'workspaces',
+            classWorkspaceId,
+            'role_assignment_history'
+          ),
+          {
+            ownerUid: user.uid,
+            roleId: ra.roleId,
+            previousStudentId: ra.studentId.slice(0, 40),
+            previousStudentName: ra.studentName.slice(0, 150),
+            newStudentId: '',
+            newStudentName: '',
+            reason: cleanReason.slice(0, 400),
+            changedByEmail: (user.email || 'gvcn@local').slice(0, 200),
+            changedAtMs: nowMs,
+            createdAt: serverTimestamp(),
+          }
+        ).catch(() => {});
+      }
+    }
+
+    await appendPermissionAuditLog({
+      action: 'Thu hồi chức vụ',
+      nickname: account.nickname,
+      studentCode: account.studentCode,
+      studentName: account.studentName,
+      details: `${cleanReason}. Đã ngắt quyền tức thì trên officer_directory và officer_memberships.`,
+    });
+    showToast(`Đã thu hồi chức vụ & ngắt quyền tức thì của ${account.nickname}.`);
+  };
+
+  // Liên kết lại tài khoản hiện có (mã cũ HSxxx → hồ sơ MOET mới) CHO CÙNG 1 HỌC SINH — giữ nguyên Firebase UID
+  const handleRelinkExistingOfficerAccount = async (
+    account: OfficerAccountRecord,
+    targetStudent: StudentRecord,
+    roles: OfficerRoleId[]
+  ) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      throw new Error('Chỉ GVCN mới có quyền liên kết lại tài khoản cán bộ lớp.');
+    }
+    if (normalizeNameKey(account.studentName) !== normalizeNameKey(targetStudent.fullName)) {
+      throw new Error(
+        `Từ chối liên kết: Tài khoản ${account.nickname} thuộc về "${account.studentName}", KHÔNG được phép chuyển UID sang học sinh khác "${targetStudent.fullName}".`
+      );
+    }
+    const validRoles = Array.from(new Set(roles.filter((r) => isValidOfficerRoleId(r)))).slice(0, 2);
+    const nextRoles = validRoles.length > 0 ? validRoles : account.roles;
+    const assignedTeam = getTeamFromOfficerRoles(nextRoles);
+    const studentMoet = getStudentMoetCode(targetStudent);
+
+    await updateDoc(
+      doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'officer_accounts', account.studentCode),
+      {
+        studentId: targetStudent.id.slice(0, 40),
+        moetCode: studentMoet.slice(0, 40),
+        studentName: targetStudent.fullName.slice(0, 150),
+        team: Number(targetStudent.team) || 1,
+        roles: nextRoles,
+        assignedTeam,
+        updatedAt: serverTimestamp(),
+      }
+    );
+    await updateDoc(doc(db, 'officer_memberships', account.officerUid), {
+      studentId: targetStudent.id.slice(0, 40),
+      moetCode: studentMoet.slice(0, 40),
+      studentName: targetStudent.fullName.slice(0, 150),
+      roles: nextRoles,
+      assignedTeam,
+      updatedAt: serverTimestamp(),
+    }).catch(() => {});
+
+    for (const r of nextRoles) {
+      const ra = roleAssignments.find((x) => x.roleId === r && x.studentId === targetStudent.id);
+      if (ra) {
+        await updateDoc(
+          doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'role_assignments', r),
+          {
+            officerUid: account.officerUid,
+            nickname: account.nickname,
+            updatedAt: serverTimestamp(),
+          }
+        ).catch(() => {});
+      }
+    }
+
+    await appendPermissionAuditLog({
+      action: 'Liên kết lại tài khoản hiện có (giữ UID)',
+      nickname: account.nickname,
+      studentCode: targetStudent.code,
+      studentName: targetStudent.fullName,
+      details: `Liên kết tài khoản ${account.nickname} (UID ${account.officerUid.slice(0, 8)}..., mã cũ ${account.studentCode}) với học sinh ${targetStudent.fullName} (Mã MOET: ${studentMoet || targetStudent.code}).`,
+    });
+    showToast(`Đã liên kết tài khoản ${account.nickname} với ${targetStudent.fullName} (giữ nguyên UID)!`);
+  };
+
+  // GIAI ĐOẠN 2 (chỉ chạy khi GVCN bấm xác nhận trong OfficerReconciliationModal):
+  // Chốt giao dịch duy nhất 7 vị trí chính thức vào role_assignments/{roleId} + lưu role_assignment_history + đồng bộ students.roles (KHÔNG đụng rosterOrder, moetCode, team, PII, điểm)
+  const handleConfirmOfficialRoleAssignments = async (payload: {
+    selections: Record<OfficerRoleId, string>;
+    acknowledgedTeamMismatches: Partial<Record<OfficerRoleId, boolean>>;
+    revokeStaleAccountIds: string[];
+  }) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      throw new Error('Chỉ GVCN mới có quyền chốt phân công chính thức 7 vị trí cán bộ lớp.');
+    }
+
+    const validation = validateOfficerReconciliationDraft({
+      selections: payload.selections,
+      acknowledgedTeamMismatches: payload.acknowledgedTeamMismatches,
+      students,
+      analyzedAccounts: officerGovernance.analyzedAccounts,
+    });
+    if (!validation.valid) {
+      throw new Error(validation.blockingErrors.join(' '));
+    }
+
+    const nowMs = Date.now();
+    const actorEmail = (user.email || 'gvcn@local').slice(0, 200);
+    const wsRefSegments = ['users', user.uid, 'workspaces', classWorkspaceId] as const;
+
+    // 1. Atomic Firestore transaction bảo đảm mỗi chức vụ chỉ có ĐÚNG 1 role_assignments/{roleId}
+    const historyPayloads: Array<Omit<RoleAssignmentHistoryRecord, 'id' | 'createdAt'>> = [];
+
+    await runTransaction(db, async (tx) => {
+      const existingByRole = new Map<OfficerRoleId, RoleAssignmentRecord | null>();
+      for (const roleId of VALID_CLASS_OFFICER_ROLES) {
+        const raRef = doc(db, ...wsRefSegments, 'role_assignments', roleId);
+        const snap = await tx.get(raRef);
+        existingByRole.set(
+          roleId,
+          snap.exists()
+            ? ({
+                ...(snap.data() as Omit<RoleAssignmentRecord, 'id'>),
+                id: roleId,
+              } satisfies RoleAssignmentRecord)
+            : null
+        );
+      }
+
+      for (const roleId of VALID_CLASS_OFFICER_ROLES) {
+        const studentId = payload.selections[roleId];
+        const st = students.find((s) => s.id === studentId);
+        if (!st) {
+          throw new Error(`Không tìm thấy học sinh cho vị trí ${ROLE_ID_TO_LABEL[roleId]}.`);
+        }
+        const previewRow = validation.previewRows.find((r) => r.roleId === roleId);
+        const matchedAcc = previewRow?.matchedAccount?.account || null;
+        const matchedAnalyzed = previewRow?.matchedAccount || null;
+        const prev = existingByRole.get(roleId) || null;
+        const studentMoet = getStudentMoetCode(st);
+
+        let nextStatus: RoleAssignmentRecord['status'] = 'assigned_no_account';
+        if (matchedAcc && matchedAnalyzed) {
+          if (matchedAnalyzed.securityLockReason) nextStatus = 'locked';
+          else if (matchedAcc.active && matchedAnalyzed.liveMembership?.active !== false) nextStatus = 'active';
+          else nextStatus = 'has_account_pending_activation';
+        }
+
+        const raRef = doc(db, ...wsRefSegments, 'role_assignments', roleId);
+        tx.set(raRef, {
+          ownerUid: user.uid,
+          roleId,
+          studentId: st.id.slice(0, 40),
+          studentCode: st.code.slice(0, 40),
+          moetCode: studentMoet.slice(0, 40),
+          studentName: st.fullName.slice(0, 150),
+          team: Number(st.team) || 1,
+          officerUid: matchedAcc ? matchedAcc.officerUid.slice(0, 128) : '',
+          nickname: matchedAcc ? matchedAcc.nickname.slice(0, 40) : '',
+          status: nextStatus,
+          teamMismatchAcknowledged: Boolean(payload.acknowledgedTeamMismatches[roleId]),
+          confirmedByEmail: actorEmail,
+          confirmedAtMs: nowMs,
+          createdAt: prev?.createdAt || serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        const changedHolder = !prev || prev.studentId !== st.id;
+        if (changedHolder) {
+          historyPayloads.push({
+            ownerUid: user.uid,
+            roleId,
+            previousStudentId: (prev?.studentId || '').slice(0, 40),
+            previousStudentName: (prev?.studentName || '').slice(0, 150),
+            newStudentId: st.id.slice(0, 40),
+            newStudentName: st.fullName.slice(0, 150),
+            reason: (
+              prev
+                ? `GVCN rà soát & đồng bộ xử lý phân công trùng (${prev.studentName} → ${st.fullName})`
+                : `GVCN xác nhận phân công chính thức vị trí ${ROLE_ID_TO_LABEL[roleId]}`
+            ).slice(0, 400),
+            changedByEmail: actorEmail,
+            changedAtMs: nowMs,
+          });
+        }
+      }
+    });
+
+    // 2. Ghi bản ghi lịch sử bất biến (role_assignment_history)
+    for (const h of historyPayloads) {
+      await addDoc(collection(db, ...wsRefSegments, 'role_assignment_history'), {
+        ...h,
+        createdAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+
+    // 3. Đồng bộ CHỈ các trường chức vụ (role, secondRole, roles) trên students/{id} — TUYỆT ĐỐI KHÔNG đụng rosterOrder, moetCode, code, team, PII, điểm
+    const studentBatch = writeBatch(db);
+    let updatedStudentsCount = 0;
+    for (const diff of validation.studentRoleDiffs) {
+      const legacy = studentRolesToLegacyFields(diff.newRoles);
+      const stRef = doc(db, ...wsRefSegments, 'students', diff.student.id);
+      studentBatch.update(stRef, {
+        role: legacy.role,
+        secondRole: legacy.secondRole,
+        roles: legacy.roles,
+        updatedAt: serverTimestamp(),
+      });
+      updatedStudentsCount += 1;
+    }
+    if (updatedStudentsCount > 0) {
+      await studentBatch.commit();
+    }
+
+    // 4. Cập nhật vai trò trên các tài khoản ĐÚNG HỌC SINH (KHÔNG đổi UID, KHÔNG tự mở tài khoản bị khóa)
+    const syncedAccountCodes = new Set<string>();
+    for (const row of validation.previewRows) {
+      const matched = row.matchedAccount;
+      const st = row.selectedStudent;
+      if (!matched || !st || syncedAccountCodes.has(matched.account.studentCode)) continue;
+      syncedAccountCodes.add(matched.account.studentCode);
+
+      const officialRolesForStudent = validation.rolesByStudentId[st.id] || [];
+      if (officialRolesForStudent.length === 0) continue;
+      const assignedTeam = getTeamFromOfficerRoles(officialRolesForStudent);
+      const studentMoet = getStudentMoetCode(st);
+      const allowDirect = officialRolesForStudent.includes('lop_truong')
+        ? Boolean(matched.account.allowDirectClassAttendance)
+        : false;
+
+      await updateDoc(
+        doc(db, ...wsRefSegments, 'officer_accounts', matched.account.studentCode),
+        {
+          studentId: st.id.slice(0, 40),
+          moetCode: studentMoet.slice(0, 40),
+          studentName: st.fullName.slice(0, 150),
+          team: Number(st.team) || 1,
+          roles: officialRolesForStudent,
+          assignedTeam,
+          allowDirectClassAttendance: allowDirect,
+          updatedAt: serverTimestamp(),
+        }
+      ).catch(() => {});
+
+      await updateDoc(doc(db, 'officer_memberships', matched.account.officerUid), {
+        studentId: st.id.slice(0, 40),
+        moetCode: studentMoet.slice(0, 40),
+        studentName: st.fullName.slice(0, 150),
+        roles: officialRolesForStudent,
+        assignedTeam,
+        allowDirectClassAttendance: allowDirect,
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+    }
+
+    // 5. Chỉ thu hồi các tài khoản cũ/lệch mà GVCN ĐÃ TÍCH CHỌN rõ ràng
+    let revokedStaleCount = 0;
+    for (const staleCode of payload.revokeStaleAccountIds) {
+      const acc = officerAccounts.find((a) => a.studentCode === staleCode);
+      if (!acc) continue;
+      await handleRevokeOfficerPosition(
+        acc,
+        'GVCN xác nhận thu hồi tài khoản cũ không còn giữ chức vụ khi rà soát 7 vị trí'
+      );
+      revokedStaleCount += 1;
+    }
+
+    await appendPermissionAuditLog({
+      action: 'Chốt phân công chính thức 7 vị trí cán bộ',
+      nickname: '7-vi-tri',
+      studentCode: classConfig.className || 'class',
+      studentName: `${updatedStudentsCount} hồ sơ cập nhật chức vụ`,
+      details: `GVCN xác nhận 7 vị trí duy nhất qua giao dịch Firestore (role_assignments), giữ nguyên STT/Mã MOET/Tổ/PII/điểm số. Thu hồi ${revokedStaleCount} tài khoản cũ được chọn.`,
+    });
+
+    showToast(
+      `Đã chốt chính thức 7/7 vị trí cán bộ lớp (${updatedStudentsCount} hồ sơ đồng bộ chức vụ, giữ nguyên 100% STT & Mã MOET)!`
+    );
+  };
+
+  // Kiểm tra 8 bước (client + backend /api/officer/verify-activation + server Firestore read) rồi kích hoạt quyền cho 1 vị trí
+  const handleActivateOfficerPosition = async (payload: {
+    roleId: OfficerRoleId;
+    securityLockVerifiedByGvcn?: boolean;
+  }): Promise<{ ok: boolean; message: string }> => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      return { ok: false, message: 'Chỉ GVCN mới có quyền kích hoạt tài khoản cán bộ lớp.' };
+    }
+
+    const pos = officerGovernance.positions.find((p) => p.roleId === payload.roleId);
+    const assignment = pos?.confirmedAssignment || null;
+    const student = pos?.officialStudent || null;
+    const analyzedAcc = pos?.officialAccount || null;
+    const account = analyzedAcc?.account || null;
+
+    const clientCheck = evaluateEightPointActivationCheck({
+      roleId: payload.roleId,
+      assignment,
+      student,
+      account,
+      liveMembership: analyzedAcc?.liveMembership || null,
+      allStudents: students,
+      securityLockVerifiedByGvcn: Boolean(payload.securityLockVerifiedByGvcn),
+    });
+
+    if (!clientCheck.eligible || !student || !account || !assignment) {
+      return {
+        ok: false,
+        message: clientCheck.blockingReason || 'Chưa đạt đủ 8 điều kiện kích hoạt quyền.',
+      };
+    }
+
+    // Xác minh phía backend (Zero-IAM sử dụng Bearer ID token thật của GVCN + Firestore REST)
+    const backendVerification = await verifyOfficerActivationOnBackend({
+      workspaceId: classWorkspaceId,
+      roleId: payload.roleId,
+      studentId: student.id,
+      accountDocId: account.studentCode,
+      officerUid: account.officerUid,
+      nicknameId: account.nicknameId,
+      securityLockVerifiedByGvcn: Boolean(payload.securityLockVerifiedByGvcn),
+    });
+
+    if (!backendVerification.ok || !backendVerification.eligible) {
+      return {
+        ok: false,
+        message:
+          backendVerification.blockingReason ||
+          'Xác minh máy chủ không đạt điều kiện kích hoạt.',
+      };
+    }
+
+    // Đọc trực tiếp từ server Firestore để xác nhận officer_memberships/{uid} tồn tại thật
+    const liveMemSnap = await getDocFromServer(doc(db, 'officer_memberships', account.officerUid));
+    if (!liveMemSnap.exists()) {
+      return {
+        ok: false,
+        message: `Không tìm thấy hồ sơ officer_memberships/${account.officerUid} trên Firestore. Hãy tạo lại hoặc đặt lại mật khẩu cho ${account.nickname}.`,
+      };
+    }
+
+    // Tổng hợp tất cả vai trò chính thức của học sinh này (hỗ trợ kiêm nhiệm tối đa 2 vị trí)
+    const confirmedRolesForStudent = Array.from(
+      new Set(
+        roleAssignments
+          .filter((ra) => ra.studentId === student.id && ra.status !== 'revoked')
+          .map((ra) => ra.roleId)
+      )
+    );
+    if (!confirmedRolesForStudent.includes(payload.roleId)) {
+      confirmedRolesForStudent.push(payload.roleId);
+    }
+    const finalRoles = confirmedRolesForStudent.slice(0, 2);
+    const assignedTeam = getTeamFromOfficerRoles(finalRoles);
+    const studentMoet = getStudentMoetCode(student);
+    const allowDirect = finalRoles.includes('lop_truong')
+      ? Boolean(account.allowDirectClassAttendance)
+      : false;
+
+    await updateDoc(doc(db, 'officer_directory', account.nicknameId), {
+      active: true,
+      updatedAt: serverTimestamp(),
+    });
+    await updateDoc(doc(db, 'officer_memberships', account.officerUid), {
+      active: true,
+      permissionStatus: 'active',
+      securityLockReason: '',
+      studentId: student.id.slice(0, 40),
+      moetCode: studentMoet.slice(0, 40),
+      studentName: student.fullName.slice(0, 150),
+      roles: finalRoles,
+      assignedTeam,
+      allowDirectClassAttendance: allowDirect,
+      updatedAt: serverTimestamp(),
+    });
+    await updateDoc(
+      doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'officer_accounts', account.studentCode),
+      {
+        active: true,
+        permissionStatus: 'active',
+        securityLockReason: '',
+        studentId: student.id.slice(0, 40),
+        moetCode: studentMoet.slice(0, 40),
+        studentName: student.fullName.slice(0, 150),
+        team: Number(student.team) || 1,
+        roles: finalRoles,
+        assignedTeam,
+        allowDirectClassAttendance: allowDirect,
+        updatedAt: serverTimestamp(),
+      }
+    );
+
+    for (const r of finalRoles) {
+      await updateDoc(
+        doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'role_assignments', r),
+        {
+          officerUid: account.officerUid,
+          nickname: account.nickname,
+          status: 'active',
+          updatedAt: serverTimestamp(),
+        }
+      ).catch(() => {});
+    }
+
+    await appendPermissionAuditLog({
+      action: 'Kích hoạt quyền cán bộ lớp (đạt 8/8 kiểm tra)',
+      nickname: account.nickname,
+      studentCode: student.code,
+      studentName: student.fullName,
+      details: `Kích hoạt quyền ${finalRoles.map((r) => ROLE_ID_TO_LABEL[r]).join(' + ')} cho ${student.fullName} (Mã MOET: ${studentMoet || student.code}) sau khi xác minh client + máy chủ.${
+        payload.securityLockVerifiedByGvcn ? ' (GVCN đã xác minh mở khóa bảo mật).' : ''
+      }`,
+    });
+
+    showToast(`Đã kích hoạt quyền thành công cho ${ROLE_ID_TO_LABEL[payload.roleId]} (${account.nickname})!`);
+    return {
+      ok: true,
+      message: `Đã kích hoạt quyền ${ROLE_ID_TO_LABEL[payload.roleId]} cho ${student.fullName} (${account.nickname}).`,
+    };
+  };
+
+  // Kích hoạt lần lượt 7 vị trí chính thức (chỉ mở khi đủ 7/7 đã xác nhận và 0 vị trí trùng)
+  const handleActivateAllSevenPositions = async (payload: {
+    verifiedSecurityLockAccountIds: string[];
+  }): Promise<BatchActivationPositionResult[]> => {
+    if (
+      officerGovernance.confirmedPositionsCount < 7 ||
+      officerGovernance.duplicatePositionsCount > 0
+    ) {
+      throw new Error(
+        'Chỉ được kích hoạt 7 vị trí khi đã xác nhận đủ 7/7 chức vụ chính thức và còn 0 vị trí trùng.'
+      );
+    }
+
+    const verifiedSet = new Set(payload.verifiedSecurityLockAccountIds);
+    const results: BatchActivationPositionResult[] = [];
+
+    for (const pos of officerGovernance.positions) {
+      const stName = pos.officialStudent?.fullName || 'Chưa xác định';
+      const nick = pos.officialAccount?.account.nickname || '—';
+
+      if (pos.permissionStatus === 'active' && pos.officialAccount?.account.active) {
+        results.push({
+          roleId: pos.roleId,
+          roleLabel: pos.label,
+          studentName: stName,
+          nickname: nick,
+          status: 'already_active',
+          message: 'Đã đang hoạt động chuẩn xác.',
+        });
+        continue;
+      }
+
+      const accId = pos.officialAccount?.account.studentCode || '';
+      const res = await handleActivateOfficerPosition({
+        roleId: pos.roleId,
+        securityLockVerifiedByGvcn: verifiedSet.has(accId),
+      });
+      results.push({
+        roleId: pos.roleId,
+        roleLabel: pos.label,
+        studentName: stName,
+        nickname: nick,
+        status: res.ok ? 'activated' : 'blocked',
+        message: res.message,
+      });
+    }
+
+    return results;
   };
 
   const handleOfficerPasswordChanged = async () => {
@@ -2640,6 +3722,11 @@ export default function App() {
     [bulkParsedRows, students, studentPiiMap, bulkResolutions]
   );
 
+  const bulkColumnMappingWarnings = useMemo(
+    () => detectColumnMappingWarnings(bulkDataRows, bulkColumnMapping, bulkHeaders),
+    [bulkDataRows, bulkColumnMapping, bulkHeaders]
+  );
+
   const applyBulkMatrix = (matrix: string[][]) => {
     const detected = detectStudentHeaderAndMapping(matrix);
     setBulkHeaderRowIndex(detected.headerRowIndex);
@@ -2684,11 +3771,19 @@ export default function App() {
     setBulkParsedRows(parsed);
   };
 
+  const handleReconcileBulkAgain = () => {
+    if (bulkDataRows.length === 0) return;
+    const parsed = buildParsedStudentRows(bulkDataRows, bulkColumnMapping, bulkHeaderRowIndex);
+    setBulkParsedRows(parsed);
+    showToast(`Đã đối chiếu lại ${parsed.length} dòng học sinh theo cấu hình cột hiện tại.`);
+  };
+
   const handleToggleAllRoleProposals = (apply: boolean) => {
     setBulkParsedRows((prev) =>
       prev.map((row) => ({
         ...row,
-        applyRoleProposal: row.proposedRoleId ? apply : false,
+        applyRoleProposal: row.proposedRoles.length > 0 ? apply : false,
+        roleProposalOverride: row.proposedRoles.length > 0 ? apply : undefined,
       }))
     );
   };
@@ -2696,7 +3791,9 @@ export default function App() {
   const handleToggleRowRoleProposal = (excelRowNumber: number, apply: boolean) => {
     setBulkParsedRows((prev) =>
       prev.map((row) =>
-        row.excelRowNumber === excelRowNumber ? { ...row, applyRoleProposal: apply } : row
+        row.excelRowNumber === excelRowNumber
+          ? { ...row, applyRoleProposal: apply, roleProposalOverride: apply }
+          : row
       )
     );
   };
@@ -2705,22 +3802,36 @@ export default function App() {
     setBulkParsedRows((prev) =>
       prev.map((row) => {
         if (row.excelRowNumber !== excelRowNumber) return row;
+        const normalizedTeam = team >= 1 && team <= 4 ? team : 0;
         const nextErrors = row.errors.filter((e) => !e.startsWith('Tổ không hợp lệ'));
-        if (team < 1 || team > 4) {
-          nextErrors.push('Tổ không hợp lệ (phải từ Tổ 1 đến Tổ 4)');
-        }
-        let nextProposedRoleId = row.proposedRoleId;
-        let nextProposedRoleLabel = row.proposedRoleLabel;
-        if (row.proposedRoleId.startsWith('to_truong_') && team >= 1 && team <= 4) {
-          nextProposedRoleId = `to_truong_${team}`;
-          nextProposedRoleLabel = `Tổ trưởng Tổ ${team}`;
-        }
+        const reparsedRole = parseExcelStudentRoles(row.roleRaw, normalizedTeam);
+        const nonTeamRoleWarnings = row.warnings.filter(
+          (w) =>
+            !w.includes('Chưa phân tổ') &&
+            !w.includes('Chức vụ') &&
+            !w.includes('Không xác định được số Tổ') &&
+            !w.includes('Tổ trưởng') &&
+            !w.includes('Ô chức vụ')
+        );
+        const teamWarnings =
+          normalizedTeam === 0
+            ? ['Chưa phân tổ (vẫn được nhập, có thể phân tổ sau)']
+            : [];
+        const nextWarnings = [...nonTeamRoleWarnings, ...teamWarnings, ...reparsedRole.warnings];
         return {
           ...row,
-          team,
+          team: normalizedTeam,
+          hasUnassignedTeamWarning: normalizedTeam === 0,
           errors: nextErrors,
-          proposedRoleId: nextProposedRoleId,
-          proposedRoleLabel: nextProposedRoleLabel,
+          warnings: nextWarnings,
+          proposedRoles: reparsedRole.proposedRoles,
+          proposedRoleId: reparsedRole.proposedRoleId,
+          proposedRoleLabel: reparsedRole.proposedRoleLabel,
+          hasAmbiguousRole: reparsedRole.hasAmbiguousValue,
+          applyRoleProposal:
+            row.roleProposalOverride !== undefined
+              ? row.roleProposalOverride
+              : reparsedRole.proposedRoles.length > 0 && !reparsedRole.hasAmbiguousValue,
         };
       })
     );
@@ -2770,9 +3881,12 @@ export default function App() {
   };
 
   const handleSaveBulkStudents = async () => {
-    if (!user || activeRoleId !== 'gvcn') return;
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      showToast('Chỉ Giáo viên chủ nhiệm của lớp mới được phép nhập danh sách học sinh.', 'error');
+      return;
+    }
     if (bulkImportAnalysis.summary.blockingErrorCount > 0) {
-      showToast('Vẫn còn lỗi dữ liệu cần xử lý trước khi xác nhận nhập.', 'error');
+      showToast('Vẫn còn lỗi nghiêm trọng cần xử lý trước khi xác nhận nhập.', 'error');
       return;
     }
 
@@ -2795,36 +3909,57 @@ export default function App() {
         const stRef = doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'students', targetCode);
         const piiRef = doc(db, 'users', user.uid, 'workspaces', classWorkspaceId, 'student_pii', targetCode);
 
-        // Chức vụ trong Excel chỉ là đề xuất; ô trống hoặc chưa được GVCN xác nhận tuyệt đối không ghi đè mất quyền cũ
-        const resolvedRole =
-          item.applyRoleProposal && item.proposedRoleId
-            ? item.proposedRoleId
-            : item.matchedExisting?.role || 'member';
-        const resolvedSecondRole =
-          item.matchedExisting?.secondRole && item.matchedExisting.secondRole !== resolvedRole
-            ? item.matchedExisting.secondRole
-            : '';
+        // Chức vụ chuẩn sau đối chiếu: ô trống trong Excel tuyệt đối không xóa chức vụ đã có, và không tự cấp tài khoản đăng nhập
+        const roleFields = studentRolesToLegacyFields(item.finalRolesToSave);
+        const parsedStt = parsePositiveIntStt(item.stt);
+        const normalizedTeam = Number(item.team) >= 1 && Number(item.team) <= 4 ? Number(item.team) : 0;
+
+        // Tuyệt đối không lưu chuỗi giữ chỗ ("Không có", "Chưa có", "N/A") làm tên phụ huynh thật
+        const incomingParentName = isMissingPlaceholderValue(item.parentName) ? '' : item.parentName.trim();
+        const incomingParentPhone = isMissingPlaceholderValue(item.parentPhone) ? '' : item.parentPhone.trim();
 
         const stSnap = await getDoc(stRef);
         if (stSnap.exists()) {
+          const oldData = stSnap.data() as StudentRecord;
+          const oldRoles = getStudentRoles(oldData);
           if (item.status === 'matched') {
             unchangedCount++;
           } else {
             updatedCount++;
           }
+          // Giữ nguyên Tổ cũ nếu file nhập lại không có cột Tổ (normalizedTeam === 0) nhưng hồ sơ cũ đã phân tổ
+          const teamToSave =
+            normalizedTeam >= 1 && normalizedTeam <= 4
+              ? normalizedTeam
+              : Number(oldData.team) >= 1 && Number(oldData.team) <= 4
+                ? Number(oldData.team)
+                : 0;
+
           await updateDoc(stRef, {
             moetCode: item.moetCode,
             fullName: item.fullName,
             gender: item.gender,
-            dob: item.dob,
-            team: Number(item.team),
-            role: resolvedRole,
-            secondRole: resolvedSecondRole,
-            note: item.matchedExisting?.note || '',
+            dob: item.dob || oldData.dob || '',
+            team: teamToSave,
+            role: roleFields.role,
+            secondRole: roleFields.secondRole,
+            roles: roleFields.roles,
+            note: item.matchedExisting?.note || oldData.note || '',
+            ...(parsedStt !== null ? { rosterOrder: parsedStt } : {}),
             updatedAt: serverTimestamp(),
           });
+          if (!areRoleListsEqual(oldRoles, roleFields.roles)) {
+            await appendPermissionAuditLog({
+              action: 'Đối chiếu chức vụ từ Excel',
+              nickname: 'excel-import',
+              studentCode: targetCode,
+              studentName: item.fullName,
+              details: `Cập nhật chức vụ trong lớp từ "${formatStudentRolesLabel(oldRoles)}" thành "${formatStudentRolesLabel(roleFields.roles)}" (tài khoản đăng nhập không tự động thay đổi).`,
+            }).catch(() => {});
+          }
         } else {
           createdCount++;
+          const initialRosterOrder = parsedStt !== null ? parsedStt : item.rowIndex + 1;
           await setDoc(stRef, {
             ownerUid: user.uid,
             code: targetCode,
@@ -2832,31 +3967,50 @@ export default function App() {
             fullName: item.fullName,
             gender: item.gender,
             dob: item.dob,
-            team: Number(item.team),
-            role: resolvedRole,
-            secondRole: resolvedSecondRole,
+            team: normalizedTeam,
+            role: roleFields.role,
+            secondRole: roleFields.secondRole,
+            roles: roleFields.roles,
             note: '',
             meritPoints: 100,
             attendancePresent: 0,
             attendanceAbsent: 0,
+            rosterOrder: initialRosterOrder,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
+          if (roleFields.roles.length > 0) {
+            await appendPermissionAuditLog({
+              action: 'Nhập chức vụ học sinh từ Excel',
+              nickname: 'excel-import',
+              studentCode: targetCode,
+              studentName: item.fullName,
+              details: `Ghi nhận chức vụ trong lớp từ file Excel: ${formatStudentRolesLabel(roleFields.roles)} (chưa tự tạo tài khoản đăng nhập).`,
+            }).catch(() => {});
+          }
         }
 
+        // Bảo vệ thông tin phụ huynh đã lưu trước đó: nếu file nhập lại không có tên/SĐT PH thì KHÔNG ghi đè xóa dữ liệu đã có
         const piiSnap = await getDoc(piiRef);
         if (piiSnap.exists()) {
+          const existingPii = piiSnap.data() as { parentName?: string; parentPhone?: string };
+          const existingCleanName = isMissingPlaceholderValue(existingPii.parentName || '')
+            ? ''
+            : String(existingPii.parentName || '').trim();
+          const existingCleanPhone = isMissingPlaceholderValue(existingPii.parentPhone || '')
+            ? ''
+            : String(existingPii.parentPhone || '').trim();
           await updateDoc(piiRef, {
-            parentName: item.parentName,
-            parentPhone: item.parentPhone,
+            parentName: incomingParentName || existingCleanName,
+            parentPhone: incomingParentPhone || existingCleanPhone,
             updatedAt: serverTimestamp(),
           });
         } else {
           await setDoc(piiRef, {
             ownerUid: user.uid,
             studentCode: targetCode,
-            parentName: item.parentName,
-            parentPhone: item.parentPhone,
+            parentName: incomingParentName,
+            parentPhone: incomingParentPhone,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
@@ -2864,13 +4018,190 @@ export default function App() {
       }
 
       showToast(
-        `Đã xác nhận nhập ${itemsToProcess.length} học sinh (${createdCount} mới, ${updatedCount} cập nhật, ${unchangedCount} trùng khớp).`
+        `Đã xác nhận nhập ${itemsToProcess.length} học sinh vào lớp ${classConfig.className} (${createdCount} mới, ${updatedCount} cập nhật, ${unchangedCount} trùng khớp).`
       );
       setShowBulkStudentModal(false);
     } catch (err) {
       handleFirestoreError(err, OperationType.WRITE, `users/${user.uid}/workspaces/${classWorkspaceId}/students`);
     } finally {
       setIsSavingBulkStudents(false);
+    }
+  };
+
+  // Cập nhật an toàn DUY NHẤT trường rosterOrder theo STT Excel (khớp 100% theo Mã MOET, không tạo/xóa HS)
+  const handleApplyRosterOrderFromExcel = async (
+    analysis: RosterOrderReconciliationAnalysis,
+    fileName: string
+  ): Promise<boolean> => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn' || !classWorkspaceId) {
+      throw new Error('Chỉ Giáo viên chủ nhiệm của lớp mới được phép cập nhật STT học sinh.');
+    }
+    if (
+      !analysis.canConfirmApply ||
+      analysis.expectedClassSize === 0 ||
+      analysis.matchedUniqueCount !== students.length ||
+      analysis.rows.length !== students.length
+    ) {
+      throw new Error(
+        'Bảng đối chiếu STT chưa đạt điều kiện khớp 100% theo Mã MOET cho toàn bộ học sinh trong lớp.'
+      );
+    }
+
+    const currentStudentIdSet = new Set(students.map((s) => s.id));
+    const seenTargetIds = new Set<string>();
+    const validatedRows: Array<{
+      studentId: string;
+      moetCode: string;
+      fullName: string;
+      oldRosterOrder: number | null;
+      newRosterOrder: number;
+    }> = [];
+
+    for (const row of analysis.rows) {
+      if (
+        !row.matchedStudent ||
+        row.newRosterOrder === null ||
+        !Number.isInteger(row.newRosterOrder) ||
+        row.newRosterOrder < 1 ||
+        row.newRosterOrder > students.length
+      ) {
+        throw new Error(`Dòng ${row.excelRowNumber} có dữ liệu STT hoặc liên kết học sinh không hợp lệ.`);
+      }
+      if (!currentStudentIdSet.has(row.matchedStudent.id) || seenTargetIds.has(row.matchedStudent.id)) {
+        throw new Error(`Phát hiện bất đồng bộ studentId (${row.matchedStudent.id}) trước khi ghi.`);
+      }
+      seenTargetIds.add(row.matchedStudent.id);
+      validatedRows.push({
+        studentId: row.matchedStudent.id,
+        moetCode: row.moetCode,
+        fullName: row.matchedStudent.fullName || row.excelFullName,
+        oldRosterOrder: row.currentRosterOrder,
+        newRosterOrder: row.newRosterOrder,
+      });
+    }
+
+    if (seenTargetIds.size !== students.length) {
+      throw new Error(
+        `Số lượng học sinh đối chiếu (${seenTargetIds.size}) không khớp sĩ số lớp hiện tại (${students.length}).`
+      );
+    }
+
+    const changedRows = validatedRows.filter((r) => r.oldRosterOrder !== r.newRosterOrder);
+    if (changedRows.length === 0) {
+      showToast(
+        `Thứ tự STT hiện tại của ${students.length} học sinh đã khớp 100% với file Excel — không cần ghi lại.`
+      );
+      return true;
+    }
+
+    setIsApplyingRosterOrder(true);
+    try {
+      // Ghi nguyên tử bằng writeBatch + batch.update (TUYỆT ĐỐI không dùng setDoc, không sửa bất kỳ trường nào khác)
+      const CHUNK_SIZE = 400;
+      for (let i = 0; i < changedRows.length; i += CHUNK_SIZE) {
+        const chunk = changedRows.slice(i, i + CHUNK_SIZE);
+        const batch = writeBatch(db);
+        for (const item of chunk) {
+          const stRef = doc(
+            db,
+            'users',
+            user.uid,
+            'workspaces',
+            classWorkspaceId,
+            'students',
+            item.studentId
+          );
+          batch.update(stRef, {
+            rosterOrder: item.newRosterOrder,
+            updatedAt: serverTimestamp(),
+          });
+        }
+        await batch.commit();
+      }
+
+      // Xác minh trực tiếp từ Cloud Firestore server sau khi commit — không bao giờ báo thành công nếu lệch dữ liệu
+      const studentsColRef = collection(
+        db,
+        'users',
+        user.uid,
+        'workspaces',
+        classWorkspaceId,
+        'students'
+      );
+      const verifySnap = await getDocsFromServer(studentsColRef);
+      if (verifySnap.size !== students.length) {
+        throw new Error(
+          `Xác minh sau khi lưu phát hiện sĩ số trên máy chủ (${verifySnap.size}) khác sĩ số ban đầu (${students.length}).`
+        );
+      }
+
+      const serverMap = new Map<string, StudentRecord>();
+      verifySnap.docs.forEach((d) => {
+        serverMap.set(d.id, {
+          id: d.id,
+          ...(d.data() as Omit<StudentRecord, 'id'>),
+        });
+      });
+
+      const mismatchedIds: string[] = [];
+      for (const expected of validatedRows) {
+        const saved = serverMap.get(expected.studentId);
+        if (!saved || Number(saved.rosterOrder) !== expected.newRosterOrder) {
+          mismatchedIds.push(expected.moetCode || expected.studentId);
+        }
+      }
+      if (mismatchedIds.length > 0) {
+        throw new Error(
+          `Xác minh trên Firestore sau khi ghi thất bại tại ${mismatchedIds.length} học sinh (${mismatchedIds.slice(0, 5).join(', ')}). Vui lòng thử lại.`
+        );
+      }
+
+      const verifiedList = Array.from(serverMap.values()).sort(compareStudentsByRosterOrder);
+      setStudents(verifiedList);
+
+      // Ghi nhật ký thay đổi (thời gian, tài khoản GVCN, tổng quan & chi tiết STT cũ -> STT mới)
+      const nowStr = new Date().toLocaleString('vi-VN');
+      const actorLabel = user.email || user.uid;
+      await appendPermissionAuditLog({
+        action: 'Cập nhật STT theo Excel',
+        nickname: 'roster-order',
+        studentCode: 'ALL',
+        studentName: `Lớp ${classConfig.className} (${students.length} HS)`,
+        details: `GVCN ${actorLabel} cập nhật thành công STT (rosterOrder) cho ${changedRows.length}/${students.length} HS lúc ${nowStr} từ tệp "${fileName || 'Excel'}". Đã xác minh trực tiếp trên Firestore (0 tạo mới, 0 xóa, giữ nguyên toàn bộ hồ sơ).`,
+      });
+
+      // Lưu chi tiết từng học sinh thay đổi (STT cũ -> STT mới) thành từng nhóm nhỏ <= 590 ký tự
+      const LOG_CHUNK = 12;
+      for (let i = 0; i < changedRows.length; i += LOG_CHUNK) {
+        const slice = changedRows.slice(i, i + LOG_CHUNK);
+        const mappingText = slice
+          .map(
+            (r) =>
+              `${r.moetCode}: ${r.oldRosterOrder === null ? '—' : r.oldRosterOrder}→${r.newRosterOrder}`
+          )
+          .join('; ');
+        await appendPermissionAuditLog({
+          action: 'Chi tiết cập nhật STT Excel',
+          nickname: 'roster-order',
+          studentCode: `${i + 1}-${i + slice.length}`,
+          studentName: `Nhóm ${Math.floor(i / LOG_CHUNK) + 1} (${slice.length} HS)`,
+          details: `STT cũ→mới: ${mappingText}`.slice(0, 595),
+        });
+      }
+
+      showToast(
+        `Đã cập nhật & xác minh thành công STT theo Excel cho ${changedRows.length}/${students.length} học sinh (giữ nguyên toàn bộ ${students.length} hồ sơ).`
+      );
+      return true;
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Không thể cập nhật STT học sinh lên Firestore. Vui lòng kiểm tra kết nối và quyền GVCN.';
+      showToast('Lỗi cập nhật STT theo Excel: ' + msg, 'error');
+      throw err instanceof Error ? err : new Error(msg);
+    } finally {
+      setIsApplyingRosterOrder(false);
     }
   };
 
@@ -4333,7 +5664,7 @@ export default function App() {
       id: d.id,
       ...(d.data() as Omit<StudentRecord, 'id'>),
     }));
-    freshStudents.sort((a, b) => (a.code || '').localeCompare(b.code || ''));
+    freshStudents.sort(compareStudentsByRosterOrder);
 
     const freshScoresMap: Record<string, SubjectScoreRecord> = {};
     scoreSnap.docs.forEach((d) => {
@@ -4689,6 +6020,9 @@ Hãy viết báo cáo phân tích ngắn gọn, nhân văn bằng tiếng Việt
       });
       const data = await res.json();
       if (!res.ok) {
+        if (data.code === 'GEMINI_KEY_NOT_CONNECTED' || data.code === 'GEMINI_KEY_RECONNECT_REQUIRED') {
+          setShowGeminiKeyModal(true);
+        }
         throw new Error(data.error || 'Không nhận được phản hồi từ máy chủ AI.');
       }
       setAiAnalysisResult(data.text || '');
@@ -4735,6 +6069,9 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
       });
       const data = await res.json();
       if (!res.ok) {
+        if (data.code === 'GEMINI_KEY_NOT_CONNECTED' || data.code === 'GEMINI_KEY_RECONNECT_REQUIRED') {
+          setShowGeminiKeyModal(true);
+        }
         throw new Error(data.error || 'Không gọi được trợ lý AI soạn tin nhắn.');
       }
       setGeneratedMessage(data.message || '');
@@ -4745,6 +6082,178 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
       showToast(msg, 'error');
     } finally {
       setIsGeneratingComm(false);
+    }
+  };
+
+  // Trợ lý Nhận xét Sư phạm AI — Lưu minh chứng GVCN, Nhận xét học bạ và Bản nháp tin nhắn PH (chỉ GVCN)
+  const handleSavePedagogicalObservation = async (record: PedagogicalObservationRecord) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn') {
+      showToast('Chỉ GVCN mới được xác nhận minh chứng sư phạm.', 'error');
+      return;
+    }
+    const docRef = doc(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'pedagogical_observations',
+      record.id
+    );
+    try {
+      const existingSnap = await getDoc(docRef);
+      const mutablePayload: Record<string, unknown> = {
+        moetCode: (record.moetCode || '').slice(0, 60),
+        officialConduct: record.officialConduct || '',
+        officialAcademic: record.officialAcademic || '',
+        verifiedStrengths: (record.verifiedStrengths || '').slice(0, 1200),
+        verifiedImprovements: (record.verifiedImprovements || '').slice(0, 1200),
+        verifiedAchievements: (record.verifiedAchievements || '').slice(0, 1000),
+        verifiedIncidentNote: (record.verifiedIncidentNote || '').slice(0, 1200),
+        incidentStatus: record.incidentStatus || 'none',
+        sourceLabel: (record.sourceLabel || 'GVCN xác nhận trực tiếp').slice(0, 200),
+        confirmedByEmail: (record.confirmedByEmail || user.email || 'gvcn').slice(0, 200),
+        confirmedAtMs: record.confirmedAtMs || Date.now(),
+        updatedAt: serverTimestamp(),
+      };
+      if (existingSnap.exists()) {
+        await updateDoc(docRef, mutablePayload);
+      } else {
+        await setDoc(docRef, {
+          ownerUid: user.uid,
+          studentId: record.studentId.slice(0, 60),
+          studentCode: record.studentCode.slice(0, 40),
+          semester: record.semester,
+          ...mutablePayload,
+          createdAt: serverTimestamp(),
+        });
+      }
+      showToast('Đã lưu & xác nhận minh chứng sư phạm của GVCN.');
+    } catch (err) {
+      handleFirestoreError(
+        err,
+        OperationType.WRITE,
+        `users/${user.uid}/workspaces/${classWorkspaceId}/pedagogical_observations/${record.id}`
+      );
+      showToast('Không thể lưu minh chứng sư phạm. Vui lòng thử lại.', 'error');
+    }
+  };
+
+  const handleSaveReportCardComment = async (record: ReportCardCommentRecord) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn') {
+      showToast('Chỉ GVCN mới được lưu hoặc duyệt nhận xét học bạ.', 'error');
+      return;
+    }
+    const docRef = doc(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'report_card_comments',
+      record.id
+    );
+    try {
+      const existingSnap = await getDoc(docRef);
+      const mutablePayload: Record<string, unknown> = {
+        moetCode: (record.moetCode || '').slice(0, 60),
+        studentName: record.studentName.slice(0, 150),
+        ...(typeof record.rosterOrder === 'number' ? { rosterOrder: record.rosterOrder } : {}),
+        schoolYear: (record.schoolYear || classConfig.schoolYear).slice(0, 40),
+        lengthMode: record.lengthMode,
+        schoolTemplate: (record.schoolTemplate || '').slice(0, 400),
+        maxChars: typeof record.maxChars === 'number' ? Math.max(0, Math.min(2000, record.maxChars)) : 0,
+        currentDraft: record.currentDraft.slice(0, 2000),
+        teacherEdited: Boolean(record.teacherEdited),
+        status: record.status,
+        ...(record.approvedByEmail ? { approvedByEmail: record.approvedByEmail.slice(0, 200) } : {}),
+        ...(typeof record.approvedAtMs === 'number' ? { approvedAtMs: record.approvedAtMs } : {}),
+        versions: (record.versions || []).slice(0, 15),
+        updatedAt: serverTimestamp(),
+      };
+      if (existingSnap.exists()) {
+        await updateDoc(docRef, mutablePayload);
+      } else {
+        await setDoc(docRef, {
+          ownerUid: user.uid,
+          studentId: record.studentId.slice(0, 60),
+          studentCode: record.studentCode.slice(0, 40),
+          semester: record.semester,
+          ...mutablePayload,
+          createdAt: serverTimestamp(),
+        });
+      }
+      showToast(
+        record.status === 'approved_locked'
+          ? `Đã duyệt & khóa nhận xét học bạ chính thức cho ${record.studentName}!`
+          : `Đã lưu bản nháp nhận xét học bạ cho ${record.studentName}.`
+      );
+    } catch (err) {
+      handleFirestoreError(
+        err,
+        OperationType.WRITE,
+        `users/${user.uid}/workspaces/${classWorkspaceId}/report_card_comments/${record.id}`
+      );
+      showToast('Không thể lưu nhận xét học bạ. Vui lòng thử lại.', 'error');
+    }
+  };
+
+  const handleSaveParentMessage = async (record: ParentMessageRecord) => {
+    if (!user || sessionKind !== 'teacher' || activeRoleId !== 'gvcn') {
+      showToast('Chỉ GVCN mới được lưu bản nháp tin nhắn phụ huynh.', 'error');
+      return;
+    }
+    const docRef = doc(
+      db,
+      'users',
+      user.uid,
+      'workspaces',
+      classWorkspaceId,
+      'parent_messages',
+      record.id
+    );
+    try {
+      const existingSnap = await getDoc(docRef);
+      const mutablePayload: Record<string, unknown> = {
+        moetCode: (record.moetCode || '').slice(0, 60),
+        studentName: record.studentName.slice(0, 150),
+        recipientName: (record.recipientName || '').slice(0, 150),
+        purpose: record.purpose,
+        salutation: (record.salutation || 'Kính gửi quý phụ huynh,').slice(0, 180),
+        tone: record.tone,
+        incidentStatus: record.incidentStatus || 'none',
+        currentDraft: record.currentDraft.slice(0, 3000),
+        teacherEdited: Boolean(record.teacherEdited),
+        status: record.status,
+        ...(record.approvedByEmail ? { approvedByEmail: record.approvedByEmail.slice(0, 200) } : {}),
+        ...(typeof record.approvedAtMs === 'number' ? { approvedAtMs: record.approvedAtMs } : {}),
+        versions: (record.versions || []).slice(0, 15),
+        updatedAt: serverTimestamp(),
+      };
+      if (existingSnap.exists()) {
+        await updateDoc(docRef, mutablePayload);
+      } else {
+        await setDoc(docRef, {
+          ownerUid: user.uid,
+          studentId: record.studentId.slice(0, 60),
+          studentCode: record.studentCode.slice(0, 40),
+          semester: record.semester,
+          ...mutablePayload,
+          createdAt: serverTimestamp(),
+        });
+      }
+      showToast(
+        record.status === 'approved_ready'
+          ? `Đã đánh dấu bản tin nhắn sẵn sàng sao chép cho phụ huynh em ${record.studentName}.`
+          : `Đã lưu bản nháp tin nhắn phụ huynh cho em ${record.studentName}.`
+      );
+    } catch (err) {
+      handleFirestoreError(
+        err,
+        OperationType.WRITE,
+        `users/${user.uid}/workspaces/${classWorkspaceId}/parent_messages/${record.id}`
+      );
+      showToast('Không thể lưu bản nháp tin nhắn phụ huynh. Vui lòng thử lại.', 'error');
     }
   };
 
@@ -5202,6 +6711,38 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
         </div>
       );
     }
+
+    // Bước 2: Sau khi đăng nhập Google thành công, nếu giáo viên chưa kết nối Gemini API key cá nhân
+    if (geminiKeyStatus.loading && !geminiKeyStatus.loaded) {
+      return (
+        <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center p-6">
+          <div className="w-12 h-12 border-4 border-[#0C9BA6] border-t-transparent rounded-full animate-spin mb-4" />
+          <h2 className="text-lg font-bold text-[#102744]">Đang kiểm tra kết nối Gemini AI cá nhân...</h2>
+          <p className="text-sm text-slate-500 mt-1">Bảo mật riêng theo tài khoản giáo viên</p>
+        </div>
+      );
+    }
+
+    if (geminiKeyStatus.loaded && !geminiKeyStatus.connected && geminiStep2DismissedUid !== user.uid) {
+      return (
+        <GeminiKeySetupPanel
+          mode="step2_screen"
+          teacherEmail={user.email || ''}
+          teacherName={classConfig.teacherName || user.displayName || 'GVCN'}
+          classLabel={classConfig.className ? `Lớp ${classConfig.className}` : undefined}
+          keyStatus={geminiKeyStatus}
+          onStatusUpdated={(next) => {
+            setGeminiKeyStatus(next);
+            if (next.connected) {
+              setGeminiStep2DismissedUid(user.uid);
+            }
+          }}
+          onContinueWithoutAi={() => setGeminiStep2DismissedUid(user.uid)}
+          onSignOut={() => void handleSignOut()}
+          onToast={showToast}
+        />
+      );
+    }
   }
 
   const navItems: {
@@ -5235,9 +6776,10 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
     { id: 'vnedu_import', label: 'Nhập điểm Excel vnEdu', icon: FileSpreadsheet, group: 'Công cụ giáo viên' },
     { id: 'grade12', label: 'Theo dõi học tập lớp 12', icon: GraduationCap, group: 'Công cụ giáo viên' },
     { id: 'ai_analysis', label: 'Phân tích học tập AI', icon: Bot, group: 'Công cụ giáo viên' },
-    { id: 'parent_comm', label: 'Nhận xét & Tin nhắn PH', icon: MessageSquareHeart, group: 'Công cụ giáo viên' },
+    { id: 'parent_comm', label: 'Trợ lý Nhận xét Sư phạm AI', icon: MessageSquareHeart, group: 'Công cụ giáo viên' },
     { id: 'reports', label: 'Báo cáo & Xuất dữ liệu', icon: FileBarChart2, group: 'Công cụ giáo viên' },
     { id: 'roles', label: 'Phân quyền 8 vị trí', icon: ShieldCheck, group: 'Hệ thống' },
+    { id: 'gemini_key', label: 'Kết nối Gemini AI cá nhân', icon: KeyRound, group: 'Hệ thống' },
     { id: 'config', label: 'Cấu hình Lớp & Năm học', icon: Settings, group: 'Hệ thống' },
   ];
 
@@ -5370,7 +6912,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
           )}
           <button
             type="button"
-            onClick={() => signOutUser()}
+            onClick={() => void handleSignOut()}
             className="w-full py-2 px-3 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-white font-semibold flex items-center justify-center gap-2 transition-all"
           >
             <LogOut className="w-3.5 h-3.5" />
@@ -5466,7 +7008,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
             )}
             <button
               type="button"
-              onClick={() => signOutUser()}
+              onClick={() => void handleSignOut()}
               className="w-full mt-2 py-2 px-3 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-white text-xs font-bold flex items-center justify-center gap-2"
             >
               <LogOut className="w-3.5 h-3.5" />
@@ -5528,7 +7070,24 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               </button>
             </div>
           ) : (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setShowGeminiKeyModal(true)}
+                className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all ${
+                  geminiKeyStatus.connected
+                    ? 'bg-emerald-50 hover:bg-emerald-100 border-emerald-200 text-emerald-800'
+                    : 'bg-amber-50 hover:bg-amber-100 border-amber-300 text-amber-900'
+                }`}
+                title="Quản lý Gemini API key cá nhân của giáo viên"
+              >
+                <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {geminiKeyStatus.connected
+                    ? `Gemini AI cá nhân: Đã kết nối (${geminiKeyStatus.maskedHint})`
+                    : 'Gemini AI cá nhân: Chưa kết nối'}
+                </span>
+              </button>
               <label htmlFor="role-select" className="text-xs text-slate-500 hidden sm:inline">
                 Xem trước giao diện vị trí (GVCN):
               </label>
@@ -5602,7 +7161,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               classConfig={classConfig}
               membership={officerMembership}
               onOpenChangePassword={() => setShowOfficerChangePasswordModal(true)}
-              onSignOut={() => void signOutUser()}
+              onSignOut={() => void handleSignOut()}
             />
           )}
 
@@ -5622,15 +7181,24 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
           {(!officerAllowedTabs || officerAllowedTabs.has('students')) && activeTab === 'students' && (
             <StudentsTab
               activeRoleId={activeRoleId}
+              isRealOfficer={isRealOfficer}
               classConfig={classConfig}
               students={students}
               filteredStudents={filteredStudents}
               studentPiiMap={studentPiiMap}
+              officerAccounts={officerAccounts}
+              officerLoginStatusMap={officerLoginStatusMap}
+              permissionAuditLogs={permissionAuditLogs}
               searchStudent={searchStudent}
               setSearchStudent={setSearchStudent}
               filterTeam={filterTeam}
               setFilterTeam={setFilterTeam}
               onSeedSampleStudents={handleSeedSampleStudents}
+              onOpenRosterOrderModal={
+                !isRealOfficer && activeRoleId === 'gvcn'
+                  ? () => setShowRosterOrderModal(true)
+                  : undefined
+              }
               onOpenBulkModal={() => {
                 setBulkWorkbook(null);
                 setBulkFileName('');
@@ -5674,6 +7242,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               }}
               onOpenEditModal={(st) => {
                 const pii = studentPiiMap[st.code] || studentPiiMap[st.id];
+                const stRoles = getStudentRoles(st);
                 setEditingStudent(st);
                 setStudentForm({
                   code: st.code,
@@ -5682,8 +7251,8 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
                   gender: st.gender,
                   dob: formatDobToDmy(st.dob || ''),
                   team: Number(st.team) || 1,
-                  role: st.role || 'member',
-                  secondRole: st.secondRole || '',
+                  role: stRoles[0] || 'member',
+                  secondRole: stRoles[1] || '',
                   parentName: pii?.parentName || '',
                   parentPhone: pii?.parentPhone || '',
                   note: st.note || '',
@@ -5692,6 +7261,8 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               }}
               onDeleteStudent={handleDeleteStudent}
               onOpenDeleteAllModal={() => setShowDeleteAllModal(true)}
+              onQuickUpdateStudentRoles={handleQuickUpdateStudentRoles}
+              onNavigateToRoles={() => setActiveTab('roles')}
             />
           )}
 
@@ -5928,6 +7499,8 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
                 setActiveTab('parent_comm');
               }}
               onShowToast={showToast}
+              geminiKeyConnected={geminiKeyStatus.connected}
+              onOpenGeminiKeySetup={() => setShowGeminiKeyModal(true)}
             />
           )}
 
@@ -6039,29 +7612,33 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               aiAnalysisResult={aiAnalysisResult}
               isGeneratingAiAnalysis={isGeneratingAiAnalysis}
               onRunAnalysis={handleRunGeminiAnalysis}
+              geminiKeyConnected={geminiKeyStatus.connected}
+              onOpenGeminiKeySetup={() => setShowGeminiKeyModal(true)}
             />
           )}
 
           {!isRealOfficer && activeTab === 'parent_comm' && (
-            <ParentCommTab
+            <PedagogicalAssistantTab
               classConfig={classConfig}
               students={students}
-              selectedCommStudentId={selectedCommStudentId}
-              setSelectedCommStudentId={setSelectedCommStudentId}
-              commPurpose={commPurpose}
-              setCommPurpose={setCommPurpose}
-              commTone={commTone}
-              setCommTone={setCommTone}
-              commExtraContext={commExtraContext}
-              setCommExtraContext={setCommExtraContext}
-              generatedMessage={generatedMessage}
-              generatedReportCardDraft={generatedReportCardDraft}
-              isGeneratingComm={isGeneratingComm}
-              onGenerateComm={handleGenerateParentComm}
-              onCopyText={(text, label) => {
-                navigator.clipboard.writeText(text);
-                showToast(`Đã sao chép ${label} vào khay nhớ tạm!`);
-              }}
+              studentPii={studentPiiMap}
+              subjectScores={subjectScores}
+              activeSubjectSlug={activeSubjectSlug}
+              activeSubjectName={classConfig.subject || 'Ngữ văn'}
+              weeklySnapshots={weeklySnapshots}
+              tickets={tickets}
+              grade12Profiles={grade12Profiles}
+              observationsById={pedagogicalObservationsMap}
+              reportCardCommentsById={reportCardCommentsMap}
+              parentMessagesById={parentMessagesMap}
+              teacherEmail={user?.email || ''}
+              getAuthHeader={getAuthBearerHeaders}
+              onSaveObservation={handleSavePedagogicalObservation}
+              onSaveReportCardComment={handleSaveReportCardComment}
+              onSaveParentMessage={handleSaveParentMessage}
+              onToast={(msg) => showToast(msg)}
+              geminiKeyConnected={geminiKeyStatus.connected}
+              onOpenGeminiKeySetup={() => setShowGeminiKeyModal(true)}
             />
           )}
 
@@ -6087,15 +7664,35 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               classConfig={classConfig}
               students={students}
               officerAccounts={officerAccounts}
+              roleAssignments={roleAssignments}
+              roleAssignmentHistory={roleAssignmentHistory}
+              governance={officerGovernance}
               officerLoginStatusMap={officerLoginStatusMap}
               permissionAuditLogs={permissionAuditLogs}
+              onOpenReconciliationModal={() => setShowOfficerReconciliationModal(true)}
               onCreateOfficerAccount={handleCreateOfficerAccount}
               onUpdateOfficerRoles={handleUpdateOfficerRoles}
               onToggleMonitorDirectAttendance={handleToggleMonitorDirectAttendance}
               onToggleOfficerLock={handleToggleOfficerLock}
+              onLockOfficerWithReason={handleLockOfficerWithReason}
+              onRelinkExistingOfficerAccount={handleRelinkExistingOfficerAccount}
+              onActivateOfficerPosition={handleActivateOfficerPosition}
+              onRevokeOfficerPosition={handleRevokeOfficerPosition}
               onResetOfficerPassword={handleResetOfficerPassword}
               onBatchResetPasswords={handleBatchResetPasswords}
               onDeleteOfficerAccount={handleDeleteOfficerAccount}
+            />
+          )}
+
+          {!isRealOfficer && activeTab === 'gemini_key' && (
+            <GeminiKeySetupPanel
+              mode="tab"
+              teacherEmail={user.email || ''}
+              teacherName={classConfig.teacherName || user.displayName || 'GVCN'}
+              classLabel={classConfig.className ? `Lớp ${classConfig.className}` : undefined}
+              keyStatus={geminiKeyStatus}
+              onStatusUpdated={setGeminiKeyStatus}
+              onToast={showToast}
             />
           )}
 
@@ -6153,7 +7750,9 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
         onSelectSheet={handleSelectBulkSheet}
         bulkHeaders={bulkHeaders}
         bulkColumnMapping={bulkColumnMapping}
+        columnMappingWarnings={bulkColumnMappingWarnings}
         onChangeMapping={handleChangeBulkMapping}
+        onReconcileAgain={handleReconcileBulkAgain}
         bulkStudentText={bulkStudentText}
         onBulkTextChange={handleBulkTextChange}
         onBulkExcelUpload={handleBulkExcelUpload}
@@ -6165,6 +7764,37 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
         isSavingBulkStudents={isSavingBulkStudents}
         onSaveBulkStudents={handleSaveBulkStudents}
       />
+
+      {!isRealOfficer && activeRoleId === 'gvcn' && (
+        <RosterOrderUpdateModal
+          open={showRosterOrderModal}
+          onClose={() => setShowRosterOrderModal(false)}
+          classConfig={classConfig}
+          students={students}
+          isApplying={isApplyingRosterOrder}
+          onApplyRosterOrder={handleApplyRosterOrderFromExcel}
+        />
+      )}
+
+      {!isRealOfficer && activeRoleId === 'gvcn' && (
+        <OfficerReconciliationModal
+          open={showOfficerReconciliationModal}
+          onClose={() => setShowOfficerReconciliationModal(false)}
+          classConfig={classConfig}
+          workspaceId={classWorkspaceId}
+          teacherEmail={user?.email || ''}
+          students={students}
+          officerAccounts={officerAccounts}
+          roleAssignments={roleAssignments}
+          officerLoginStatusMap={officerLoginStatusMap}
+          governance={officerGovernance}
+          onConfirmOfficialAssignments={handleConfirmOfficialRoleAssignments}
+          onRelinkExistingOfficerAccount={handleRelinkExistingOfficerAccount}
+          onActivateOfficerPosition={handleActivateOfficerPosition}
+          onActivateAllSevenPositions={handleActivateAllSevenPositions}
+          onRevokeOfficerAccount={handleRevokeOfficerPosition}
+        />
+      )}
 
       <AdjustRankModal
         adjustModalData={adjustModalData}
@@ -6185,6 +7815,19 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
         onClose={() => setShowDeleteAllModal(false)}
         onConfirm={handleDeleteAllStudents}
       />
+
+      {!isRealOfficer && showGeminiKeyModal && (
+        <GeminiKeySetupPanel
+          mode="modal"
+          teacherEmail={user.email || ''}
+          teacherName={classConfig.teacherName || user.displayName || 'GVCN'}
+          classLabel={classConfig.className ? `Lớp ${classConfig.className}` : undefined}
+          keyStatus={geminiKeyStatus}
+          onStatusUpdated={setGeminiKeyStatus}
+          onClose={() => setShowGeminiKeyModal(false)}
+          onToast={showToast}
+        />
+      )}
 
       {isRealOfficer && officerMembership && (
         <OfficerChangePasswordModal

@@ -13,6 +13,43 @@
       },
       "required": ["uid", "email", "displayName", "createdAt", "updatedAt"]
     },
+    "TeacherAiKeyVault": {
+      "title": "TeacherAiKeyVault",
+      "description": "Kho lưu trữ bản mã hóa AES-256-GCM khóa Gemini API cá nhân của riêng giáo viên (chỉ backend giải mã bằng token của đúng chủ sở hữu, tuyệt đối không lưu khóa gốc)",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "provider": { "type": "string", "enum": ["gemini"] },
+        "alg": { "type": "string", "enum": ["aes-256-gcm"] },
+        "keyVersion": { "type": "string", "enum": ["v1-env", "v1-fallback"] },
+        "saltB64": { "type": "string", "maxLength": 128 },
+        "ivB64": { "type": "string", "maxLength": 64 },
+        "authTagB64": { "type": "string", "maxLength": 64 },
+        "ciphertextB64": { "type": "string", "maxLength": 1024 },
+        "maskedHint": { "type": "string", "maxLength": 40 },
+        "status": { "type": "string", "enum": ["connected"] },
+        "lastVerifiedAtMs": { "type": "number" },
+        "updatedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "ownerUid",
+        "provider",
+        "alg",
+        "keyVersion",
+        "saltB64",
+        "ivB64",
+        "authTagB64",
+        "ciphertextB64",
+        "maskedHint",
+        "status",
+        "lastVerifiedAtMs",
+        "updatedAtMs",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
     "ClassConfig": {
       "title": "ClassConfig",
       "description": "Cấu hình lớp học, trường học, năm học và số dư quỹ hiện tại",
@@ -59,8 +96,17 @@
         "gender": { "type": "string", "enum": ["Nam", "Nữ"] },
         "dob": { "type": "string", "maxLength": 30 },
         "team": { "type": "number" },
+        "rosterOrder": { "type": "number" },
         "role": { "type": "string", "maxLength": 40 },
         "secondRole": { "type": "string", "maxLength": 40 },
+        "roles": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "string",
+            "enum": ["lop_truong", "to_truong_1", "to_truong_2", "to_truong_3", "to_truong_4", "thu_quy", "bi_thu"]
+          }
+        },
         "note": { "type": "string", "maxLength": 500 },
         "meritPoints": { "type": "number" },
         "attendancePresent": { "type": "number" },
@@ -441,12 +487,16 @@
         "schoolYear": { "type": "string", "maxLength": 50 },
         "teacherName": { "type": "string", "maxLength": 120 },
         "studentCode": { "type": "string", "maxLength": 40 },
+        "studentId": { "type": "string", "maxLength": 40 },
+        "moetCode": { "type": "string", "maxLength": 40 },
         "studentName": { "type": "string", "maxLength": 150 },
         "nickname": { "type": "string", "maxLength": 60 },
         "nicknameId": { "type": "string", "maxLength": 128 },
         "roles": { "type": "array" },
         "assignedTeam": { "type": "number" },
         "active": { "type": "boolean" },
+        "permissionStatus": { "type": "string", "enum": ["pending_activation", "active", "locked", "revoked"] },
+        "securityLockReason": { "type": "string", "maxLength": 300 },
         "mustChangePassword": { "type": "boolean" },
         "allowDirectClassAttendance": { "type": "boolean" },
         "lastLoginAtMs": { "type": "number" },
@@ -463,6 +513,8 @@
       "properties": {
         "ownerUid": { "type": "string", "maxLength": 128 },
         "studentCode": { "type": "string", "maxLength": 40 },
+        "studentId": { "type": "string", "maxLength": 40 },
+        "moetCode": { "type": "string", "maxLength": 40 },
         "studentName": { "type": "string", "maxLength": 150 },
         "team": { "type": "number" },
         "nickname": { "type": "string", "maxLength": 60 },
@@ -472,6 +524,8 @@
         "roles": { "type": "array" },
         "assignedTeam": { "type": "number" },
         "active": { "type": "boolean" },
+        "permissionStatus": { "type": "string", "enum": ["pending_activation", "active", "locked", "revoked"] },
+        "securityLockReason": { "type": "string", "maxLength": 300 },
         "mustChangePassword": { "type": "boolean" },
         "allowDirectClassAttendance": { "type": "boolean" },
         "credentialVersion": { "type": "number" },
@@ -479,6 +533,47 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["ownerUid", "studentCode", "studentName", "team", "nickname", "nicknameId", "officerUid", "authEmail", "roles", "assignedTeam", "active", "mustChangePassword", "credentialVersion", "createdAt", "updatedAt"]
+    },
+    "RoleAssignment": {
+      "title": "RoleAssignment",
+      "description": "Phân công chính thức duy nhất cho từng vị trí cán bộ lớp theo lớp và năm học do GVCN xác nhận",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "roleId": { "type": "string", "enum": ["lop_truong", "to_truong_1", "to_truong_2", "to_truong_3", "to_truong_4", "thu_quy", "bi_thu"] },
+        "studentId": { "type": "string", "maxLength": 40 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "moetCode": { "type": "string", "maxLength": 40 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "team": { "type": "number" },
+        "officerUid": { "type": "string", "maxLength": 128 },
+        "nickname": { "type": "string", "maxLength": 60 },
+        "status": { "type": "string", "enum": ["assigned_no_account", "has_account_pending_activation", "active", "locked", "revoked"] },
+        "teamMismatchAcknowledged": { "type": "boolean" },
+        "confirmedByEmail": { "type": "string", "maxLength": 200 },
+        "confirmedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "roleId", "studentId", "studentCode", "studentName", "team", "status", "confirmedByEmail", "confirmedAtMs", "createdAt", "updatedAt"]
+    },
+    "RoleAssignmentHistory": {
+      "title": "RoleAssignmentHistory",
+      "description": "Lưu trữ bất biến lịch sử phân công chức vụ cũ mỗi khi GVCN đối chiếu hoặc thay đổi cán bộ lớp",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "roleId": { "type": "string", "enum": ["lop_truong", "to_truong_1", "to_truong_2", "to_truong_3", "to_truong_4", "thu_quy", "bi_thu"] },
+        "previousStudentId": { "type": "string", "maxLength": 40 },
+        "previousStudentName": { "type": "string", "maxLength": 150 },
+        "newStudentId": { "type": "string", "maxLength": 40 },
+        "newStudentName": { "type": "string", "maxLength": 150 },
+        "reason": { "type": "string", "maxLength": 400 },
+        "changedByEmail": { "type": "string", "maxLength": 200 },
+        "changedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "roleId", "previousStudentId", "previousStudentName", "newStudentId", "newStudentName", "reason", "changedByEmail", "changedAtMs", "createdAt"]
     },
     "PermissionAuditLog": {
       "title": "PermissionAuditLog",
@@ -496,6 +591,85 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["ownerUid", "action", "nickname", "studentCode", "studentName", "details", "actorEmail", "timestampMs", "createdAt"]
+    },
+    "PedagogicalObservation": {
+      "title": "PedagogicalObservation",
+      "description": "Ghi nhận minh chứng sư phạm và kết quả chính thức theo Thông tư 22 do GVCN trực tiếp bổ sung và xác nhận cho từng học sinh theo học kỳ",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "studentId": { "type": "string", "maxLength": 60 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "moetCode": { "type": "string", "maxLength": 60 },
+        "semester": { "type": "string", "enum": ["Học kỳ I", "Học kỳ II", "Cả năm"] },
+        "officialConduct": { "type": "string", "enum": ["", "Tốt", "Khá", "Đạt", "Chưa đạt"] },
+        "officialAcademic": { "type": "string", "enum": ["", "Tốt", "Khá", "Đạt", "Chưa đạt"] },
+        "verifiedStrengths": { "type": "string", "maxLength": 1200 },
+        "verifiedImprovements": { "type": "string", "maxLength": 1200 },
+        "verifiedAchievements": { "type": "string", "maxLength": 1000 },
+        "verifiedIncidentNote": { "type": "string", "maxLength": 1200 },
+        "incidentStatus": { "type": "string", "enum": ["none", "verified", "pending_verification"] },
+        "sourceLabel": { "type": "string", "maxLength": 200 },
+        "confirmedByEmail": { "type": "string", "maxLength": 200 },
+        "confirmedAtMs": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "studentId", "studentCode", "semester", "officialConduct", "officialAcademic", "incidentStatus", "sourceLabel", "confirmedByEmail", "confirmedAtMs", "createdAt", "updatedAt"]
+    },
+    "ReportCardComment": {
+      "title": "ReportCardComment",
+      "description": "Bản nháp và bản chính thức nhận xét học bạ theo Thông tư 22 gắn chặt studentId, mã MOET, học kỳ và lịch sử phiên bản",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "studentId": { "type": "string", "maxLength": 60 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "moetCode": { "type": "string", "maxLength": 60 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "rosterOrder": { "type": "number" },
+        "semester": { "type": "string", "enum": ["Học kỳ I", "Học kỳ II", "Cả năm"] },
+        "schoolYear": { "type": "string", "maxLength": 40 },
+        "lengthMode": { "type": "string", "enum": ["short", "standard", "detailed"] },
+        "schoolTemplate": { "type": "string", "maxLength": 400 },
+        "maxChars": { "type": "number" },
+        "currentDraft": { "type": "string", "maxLength": 2000 },
+        "teacherEdited": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["draft", "approved_locked"] },
+        "approvedByEmail": { "type": "string", "maxLength": 200 },
+        "approvedAtMs": { "type": "number" },
+        "versions": { "type": "array", "maxItems": 15 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "studentId", "studentCode", "studentName", "semester", "schoolYear", "lengthMode", "currentDraft", "teacherEdited", "status", "versions", "createdAt", "updatedAt"]
+    },
+    "ParentMessage": {
+      "title": "ParentMessage",
+      "description": "Bản nháp và bản đã duyệt tin nhắn phối hợp phụ huynh của GVCN (chỉ lưu nháp/sao chép, không tự động gửi)",
+      "type": "object",
+      "properties": {
+        "ownerUid": { "type": "string", "maxLength": 128 },
+        "studentId": { "type": "string", "maxLength": 60 },
+        "studentCode": { "type": "string", "maxLength": 40 },
+        "moetCode": { "type": "string", "maxLength": 60 },
+        "studentName": { "type": "string", "maxLength": 150 },
+        "recipientName": { "type": "string", "maxLength": 150 },
+        "semester": { "type": "string", "enum": ["Học kỳ I", "Học kỳ II", "Cả năm"] },
+        "purpose": { "type": "string", "enum": ["khen_ngoi_dong_vien", "thong_bao_tien_bo", "nhac_nho_chuyen_can", "nhac_nho_ne_nep", "trao_doi_hoc_tap_giam", "phoi_hop_su_viec_da_xac_minh", "xac_minh_thong_tin_chua_xac_nhan", "thong_bao_ke_hoach_hop_ph", "dinh_huong_thi_tot_nghiep_12", "dong_vien_tam_ly_hoan_canh"] },
+        "salutation": { "type": "string", "maxLength": 180 },
+        "tone": { "type": "string", "enum": ["trang_trong", "gan_gui", "nhe_nhang", "phoi_hop"] },
+        "incidentStatus": { "type": "string", "enum": ["none", "verified", "pending_verification"] },
+        "currentDraft": { "type": "string", "maxLength": 3000 },
+        "teacherEdited": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["draft", "approved_ready"] },
+        "approvedByEmail": { "type": "string", "maxLength": 200 },
+        "approvedAtMs": { "type": "number" },
+        "versions": { "type": "array", "maxItems": 15 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["ownerUid", "studentId", "studentCode", "studentName", "semester", "purpose", "salutation", "tone", "incidentStatus", "currentDraft", "teacherEdited", "status", "versions", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -515,9 +689,21 @@
       "schema": { "$ref": "#/entities/UserRoot" },
       "description": "Hồ sơ gốc của giáo viên chủ tài khoản"
     },
+    "/users/{userId}/ai_key_vault/{vaultId}": {
+      "schema": { "$ref": "#/entities/TeacherAiKeyVault" },
+      "description": "Kho mã hóa AES-256-GCM lưu Gemini API key cá nhân của riêng giáo viên (cô lập tuyệt đối theo UID, không cho giáo viên khác hay cán bộ lớp truy cập)"
+    },
     "/users/{userId}/workspaces/{workspaceId}/officer_accounts/{studentCode}": {
       "schema": { "$ref": "#/entities/OfficerAccount" },
       "description": "Quản lý tài khoản cán bộ lớp của GVCN theo mã học sinh"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/role_assignments/{roleId}": {
+      "schema": { "$ref": "#/entities/RoleAssignment" },
+      "description": "Bản ghi phân công chính thức duy nhất cho từng vị trí cán bộ lớp do GVCN xác nhận"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/role_assignment_history/{historyId}": {
+      "schema": { "$ref": "#/entities/RoleAssignmentHistory" },
+      "description": "Lịch sử phân công chức vụ cũ bất biến của lớp học"
     },
     "/users/{userId}/workspaces/{workspaceId}/permission_audit_logs/{logId}": {
       "schema": { "$ref": "#/entities/PermissionAuditLog" },
@@ -598,6 +784,18 @@
     "/users/{userId}/workspaces/{workspaceId}/subject_error_logs/{errorId}": {
       "schema": { "$ref": "#/entities/SubjectErrorLog" },
       "description": "Sổ tay lỗi sai và hướng dẫn khắc phục"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/pedagogical_observations/{obsId}": {
+      "schema": { "$ref": "#/entities/PedagogicalObservation" },
+      "description": "Minh chứng sư phạm và xếp loại chính thức theo Thông tư 22 do GVCN xác nhận (chỉ GVCN)"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/report_card_comments/{commentId}": {
+      "schema": { "$ref": "#/entities/ReportCardComment" },
+      "description": "Nhận xét học bạ có lưu nháp, phiên bản và duyệt khóa chính thức (chỉ GVCN)"
+    },
+    "/users/{userId}/workspaces/{workspaceId}/parent_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ParentMessage" },
+      "description": "Bản nháp và bản đã duyệt tin nhắn phối hợp phụ huynh (chỉ GVCN)"
     }
   }
 }

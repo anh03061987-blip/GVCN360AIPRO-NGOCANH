@@ -2399,6 +2399,8 @@ interface AiAnalysisTabProps {
   aiAnalysisResult: string;
   isGeneratingAiAnalysis: boolean;
   onRunAnalysis: () => void;
+  geminiKeyConnected?: boolean;
+  onOpenGeminiKeySetup?: () => void;
 }
 
 export function AiAnalysisTab({
@@ -2408,6 +2410,8 @@ export function AiAnalysisTab({
   aiAnalysisResult,
   isGeneratingAiAnalysis,
   onRunAnalysis,
+  geminiKeyConnected = true,
+  onOpenGeminiKeySetup,
 }: AiAnalysisTabProps) {
   return (
     <div className="space-y-6">
@@ -2415,10 +2419,10 @@ export function AiAnalysisTab({
         <div>
           <h2 className="text-xl font-bold text-[#102744] flex items-center gap-2">
             <Bot className="w-6 h-6 text-[#0C9BA6]" />
-            <span>Trợ lý Gemini AI Phân tích Học tập & Nề nếp</span>
+            <span>Trợ lý Gemini AI Phân tích Học tập &amp; Nề nếp</span>
           </h2>
           <p className="text-sm text-slate-500">
-            AI chỉ tổng hợp từ dữ liệu đã xác nhận trên Cloud Firestore (Lớp {classConfig.className}), không tự bịa thêm số liệu.
+            AI chỉ tổng hợp từ dữ liệu đã xác nhận trên Cloud Firestore (Lớp {classConfig.className}), sử dụng riêng Gemini API key cá nhân của giáo viên.
           </p>
         </div>
 
@@ -2435,14 +2439,40 @@ export function AiAnalysisTab({
           <button
             type="button"
             disabled={isGeneratingAiAnalysis}
-            onClick={onRunAnalysis}
+            onClick={geminiKeyConnected ? onRunAnalysis : onOpenGeminiKeySetup}
             className="px-4 py-2 rounded-xl bg-[#0C9BA6] hover:bg-teal-700 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-2 shadow-sm"
           >
             {isGeneratingAiAnalysis ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-            <span>{isGeneratingAiAnalysis ? 'Đang phân tích...' : 'Chạy phân tích AI'}</span>
+            <span>
+              {isGeneratingAiAnalysis
+                ? 'Đang phân tích...'
+                : geminiKeyConnected
+                  ? 'Chạy phân tích AI'
+                  : 'Kết nối Gemini AI cá nhân'}
+            </span>
           </button>
         </div>
       </div>
+
+      {!geminiKeyConnected && (
+        <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div className="text-xs text-amber-950 space-y-0.5">
+            <div className="font-bold">Chưa kết nối Gemini API key cá nhân</div>
+            <p className="text-amber-800">
+              Hệ thống không dùng chung khóa AI của người khác. Hãy kết nối Gemini API key riêng của bạn để chạy phân tích AI; các mục quản lý lớp khác vẫn dùng bình thường.
+            </p>
+          </div>
+          {onOpenGeminiKeySetup && (
+            <button
+              type="button"
+              onClick={onOpenGeminiKeySetup}
+              className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold shrink-0"
+            >
+              Kết nối ngay
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs min-h-[260px]">
         {aiAnalysisResult ? (

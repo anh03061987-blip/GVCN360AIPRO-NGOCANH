@@ -62,6 +62,19 @@ export interface OfficerDirectoryRecord {
   updatedAt?: unknown;
 }
 
+export type OfficerAccountPermissionStatus =
+  | 'pending_activation'
+  | 'active'
+  | 'locked'
+  | 'revoked';
+
+export type RoleAssignmentStatus =
+  | 'assigned_no_account'
+  | 'has_account_pending_activation'
+  | 'active'
+  | 'locked'
+  | 'revoked';
+
 export interface OfficerMembershipRecord {
   officerUid: string;
   teacherUid: string;
@@ -71,12 +84,16 @@ export interface OfficerMembershipRecord {
   schoolYear: string;
   teacherName: string;
   studentCode: string;
+  studentId?: string;
+  moetCode?: string;
   studentName: string;
   nickname: string;
   nicknameId: string;
   roles: OfficerRoleId[];
   assignedTeam: number;
   active: boolean;
+  permissionStatus?: OfficerAccountPermissionStatus;
+  securityLockReason?: string;
   mustChangePassword: boolean;
   allowDirectClassAttendance?: boolean;
   lastLoginAtMs?: number;
@@ -89,6 +106,8 @@ export interface OfficerAccountRecord {
   id: string;
   ownerUid: string;
   studentCode: string;
+  studentId?: string;
+  moetCode?: string;
   studentName: string;
   team: number;
   nickname: string;
@@ -98,11 +117,46 @@ export interface OfficerAccountRecord {
   roles: OfficerRoleId[];
   assignedTeam: number;
   active: boolean;
+  permissionStatus?: OfficerAccountPermissionStatus;
+  securityLockReason?: string;
   mustChangePassword: boolean;
   allowDirectClassAttendance?: boolean;
   credentialVersion: number;
   createdAt?: unknown;
   updatedAt?: unknown;
+}
+
+export interface RoleAssignmentRecord {
+  id: OfficerRoleId;
+  ownerUid: string;
+  roleId: OfficerRoleId;
+  studentId: string;
+  studentCode: string;
+  moetCode?: string;
+  studentName: string;
+  team: number;
+  officerUid?: string;
+  nickname?: string;
+  status: RoleAssignmentStatus;
+  teamMismatchAcknowledged?: boolean;
+  confirmedByEmail: string;
+  confirmedAtMs: number;
+  createdAt?: unknown;
+  updatedAt?: unknown;
+}
+
+export interface RoleAssignmentHistoryRecord {
+  id: string;
+  ownerUid: string;
+  roleId: OfficerRoleId;
+  previousStudentId: string;
+  previousStudentName: string;
+  newStudentId: string;
+  newStudentName: string;
+  reason: string;
+  changedByEmail: string;
+  changedAtMs: number;
+  createdAt?: unknown;
 }
 
 export interface PermissionAuditLogRecord {
@@ -136,8 +190,10 @@ export interface StudentRecord {
   gender: 'Nam' | 'Nữ';
   dob?: string;
   team: number;
+  rosterOrder?: number;
   role: string;
   secondRole?: string;
+  roles?: OfficerRoleId[];
   parentPhone?: string;
   note?: string;
   meritPoints: number;
@@ -401,3 +457,88 @@ export interface ErrorLogRecord {
   recordedBy: string;
   timestampMs: number;
 }
+
+export type PedagogicalSemester = 'Học kỳ I' | 'Học kỳ II' | 'Cả năm';
+export type OfficialTt22Level = '' | 'Tốt' | 'Khá' | 'Đạt' | 'Chưa đạt';
+export type ReportCardLengthMode = 'short' | 'standard' | 'detailed';
+export type PedagogicalIncidentStatus = 'none' | 'verified' | 'pending_verification';
+export type ParentMessageTone = 'trang_trong' | 'gan_gui' | 'nhe_nhang' | 'phoi_hop';
+export type ParentMessagePurposeId =
+  | 'khen_ngoi_dong_vien'
+  | 'thong_bao_tien_bo'
+  | 'nhac_nho_chuyen_can'
+  | 'nhac_nho_ne_nep'
+  | 'trao_doi_hoc_tap_giam'
+  | 'phoi_hop_su_viec_da_xac_minh'
+  | 'xac_minh_thong_tin_chua_xac_nhan'
+  | 'thong_bao_ke_hoach_hop_ph'
+  | 'dinh_huong_thi_tot_nghiep_12'
+  | 'dong_vien_tam_ly_hoan_canh';
+
+export interface PedagogicalVersionEntry {
+  versionId: string;
+  text: string;
+  source: 'ai' | 'teacher' | 'restore';
+  actionLabel: string;
+  actorEmail: string;
+  savedAtMs: number;
+}
+
+export interface PedagogicalObservationRecord {
+  id: string;
+  studentId: string;
+  studentCode: string;
+  moetCode?: string;
+  semester: PedagogicalSemester;
+  officialConduct: OfficialTt22Level;
+  officialAcademic: OfficialTt22Level;
+  verifiedStrengths?: string;
+  verifiedImprovements?: string;
+  verifiedAchievements?: string;
+  verifiedIncidentNote?: string;
+  incidentStatus: PedagogicalIncidentStatus;
+  sourceLabel: string;
+  confirmedByEmail: string;
+  confirmedAtMs: number;
+}
+
+export interface ReportCardCommentRecord {
+  id: string;
+  studentId: string;
+  studentCode: string;
+  moetCode?: string;
+  studentName: string;
+  rosterOrder?: number;
+  semester: PedagogicalSemester;
+  schoolYear: string;
+  lengthMode: ReportCardLengthMode;
+  schoolTemplate?: string;
+  maxChars?: number;
+  currentDraft: string;
+  teacherEdited: boolean;
+  status: 'draft' | 'approved_locked';
+  approvedByEmail?: string;
+  approvedAtMs?: number;
+  versions: PedagogicalVersionEntry[];
+}
+
+export interface ParentMessageRecord {
+  id: string;
+  studentId: string;
+  studentCode: string;
+  moetCode?: string;
+  studentName: string;
+  recipientName?: string;
+  semester: PedagogicalSemester;
+  purpose: ParentMessagePurposeId;
+  salutation: string;
+  tone: ParentMessageTone;
+  incidentStatus: PedagogicalIncidentStatus;
+  currentDraft: string;
+  teacherEdited: boolean;
+  status: 'draft' | 'approved_ready';
+  approvedByEmail?: string;
+  approvedAtMs?: number;
+  versions: PedagogicalVersionEntry[];
+}
+
