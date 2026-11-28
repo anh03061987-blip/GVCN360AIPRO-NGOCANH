@@ -17,7 +17,7 @@ import {
   Unlink,
   X,
 } from 'lucide-react';
-import { getAuthBearerHeaders } from '../firebase';
+import { fetchAuthenticatedJson } from '../firebase';
 
 export interface TeacherGeminiKeyStatus {
   loading: boolean;
@@ -30,6 +30,7 @@ export interface TeacherGeminiKeyStatus {
   usingDedicatedVaultSecret: boolean;
   encryptionKeyVersion?: 'v1-env' | 'v1-fallback' | null;
   isProduction?: boolean;
+  errorCode?: string | null;
   message?: string;
 }
 
@@ -44,7 +45,64 @@ export const INITIAL_GEMINI_KEY_STATUS: TeacherGeminiKeyStatus = {
   usingDedicatedVaultSecret: false,
   encryptionKeyVersion: null,
   isProduction: false,
+  errorCode: null,
 };
+
+interface BackendStatusPayload {
+  connected?: boolean;
+  status?: 'connected' | 'not_connected' | 'needs_reconnect';
+  maskedHint?: string;
+  lastVerifiedAtMs?: number | null;
+  updatedAtMs?: number | null;
+  usingDedicatedVaultSecret?: boolean;
+  encryptionKeyVersion?: 'v1-env' | 'v1-fallback' | null;
+  isProduction?: boolean;
+  code?: string;
+  message?: string;
+  error?: string;
+}
+
+export async function fetchTeacherGeminiKeyStatus(): Promise<TeacherGeminiKeyStatus> {
+  const result = await fetchAuthenticatedJson<BackendStatusPayload>(
+    '/api/teacher/gemini-key/status',
+    { method: 'GET' }
+  );
+
+  if (!result.ok || !result.data) {
+    return {
+      loading: false,
+      loaded: true,
+      connected: false,
+      status: 'not_connected',
+      maskedHint: '',
+      lastVerifiedAtMs: null,
+      updatedAtMs: null,
+      usingDedicatedVaultSecret: false,
+      encryptionKeyVersion: null,
+      isProduction: false,
+      errorCode: result.code || `HTTP_${result.status}`,
+      message:
+        result.error ||
+        'Không thể tải trạng thái Gemini AI cá nhân. Bạn vẫn có thể quản lý lớp học bình thường.',
+    };
+  }
+
+  const data = result.data;
+  return {
+    loading: false,
+    loaded: true,
+    connected: Boolean(data.connected),
+    status: data.status || (data.connected ? 'connected' : 'not_connected'),
+    maskedHint: data.maskedHint || '',
+    lastVerifiedAtMs: data.lastVerifiedAtMs ?? null,
+    updatedAtMs: data.updatedAtMs ?? null,
+    usingDedicatedVaultSecret: Boolean(data.usingDedicatedVaultSecret),
+    encryptionKeyVersion: data.encryptionKeyVersion ?? null,
+    isProduction: Boolean(data.isProduction),
+    errorCode: data.code || null,
+    message: data.message,
+  };
+}
 
 interface GeminiKeySetupPanelProps {
   mode: 'step2_screen' | 'tab' | 'modal';
@@ -53,6 +111,7 @@ interface GeminiKeySetupPanelProps {
   classLabel?: string;
   keyStatus: TeacherGeminiKeyStatus;
   onStatusUpdated: (next: TeacherGeminiKeyStatus) => void;
+  onReloadStatus?: () => Promise<TeacherGeminiKeyStatus | null>;
   onContinueWithoutAi?: () => void;
   onClose?: () => void;
   onSignOut?: () => void;
@@ -83,6 +142,7 @@ export function GeminiKeySetupPanel({
   classLabel,
   keyStatus,
   onStatusUpdated,
+  onReloadStatus,
   onContinueWithoutAi,
   onClose,
   onSignOut,
@@ -91,12 +151,14 @@ export function GeminiKeySetupPanel({
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [showKey, setShowKey] = useState(false);
   const [isReplacing, setIsReplacing] = useState(!keyStatus.connected);
+  const [isReloadingStatus, setIsReloadingStatus] = useState(false);
   const [isTesting, setIsTesting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isDisconnecting, setIsDisconnecting] = useState(false);
   const [confirmDisconnect, setConfirmDisconnect] = useState(false);
   const [feedback, setFeedback] = useState<{
     type: 'success' | 'error' | 'info';
+    code?: string;
     message: string;
   } | null>(null);
 
@@ -107,6 +169,31 @@ export function GeminiKeySetupPanel({
       setIsReplacing(false);
     }
   }, [keyStatus.connected]);
+
+  const handleReloadStatusClick = async () => {
+    setIsReloadingStatus(true);
+    setFeedback(null);
+    try {
+      const fresh = onReloadStatus ? await onReloadStatus() : await fetchTeacherGeminiKeyStatus();
+      if (fresh) {
+        onStatusUpdated(fresh);
+        if (fresh.connected) {
+          setFeedback({
+            type: 'success',
+            message: `Đã đồng bộ trạng thái từ máy chủ: ĐÃ KẾT NỐI (${fresh.maskedHint}).`,
+          });
+        } else if (fresh.errorCode && fresh.message) {
+          setFeedback({
+            type: 'error',
+            code: fresh.errorCode,
+            message: fresh.message,
+          });
+        }
+      }
+    } finally {
+      setIsReloadingStatus(false);
+    }
+  };
 
   const handleStartReplace = () => {
     setIsReplacing(true);
@@ -125,6 +212,7 @@ export function GeminiKeySetupPanel({
     if (!trimmed && !keyStatus.connected) {
       setFeedback({
         type: 'error',
+        code: 'EMPTY_API_KEY',
         message: 'Vui lòng dán Gemini API key cá nhân vào ô nhập trước khi kiểm tra kết nối.',
       });
       return;
@@ -133,39 +221,35 @@ export function GeminiKeySetupPanel({
     setIsTesting(true);
     setFeedback(null);
     try {
-      const headers = await getAuthBearerHeaders();
-      const resp = await fetch('/api/teacher/gemini-key/test', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(
-          trimmed
-            ? { apiKey: trimmed }
-            : { useSaved: true }
-        ),
-      });
-      const data = (await resp.json()) as {
+      const result = await fetchAuthenticatedJson<{
         ok?: boolean;
         valid?: boolean;
+        code?: string;
         message?: string;
         error?: string;
         maskedHint?: string;
-      };
-      if (!resp.ok || !data.valid) {
-        const errMsg = data.error || 'Kết nối Gemini API thất bại. Vui lòng kiểm tra lại API key.';
-        setFeedback({ type: 'error', message: errMsg });
+      }>('/api/teacher/gemini-key/test', {
+        method: 'POST',
+        body: trimmed ? { apiKey: trimmed } : { useSaved: true },
+      });
+
+      if (!result.ok || !result.data?.valid) {
+        const errMsg =
+          result.error || 'Kết nối Gemini API thất bại. Vui lòng kiểm tra lại API key.';
+        setFeedback({
+          type: 'error',
+          code: result.code || `HTTP_${result.status}`,
+          message: errMsg,
+        });
         onToast?.(errMsg, 'error');
         return;
       }
 
       const okMsg =
-        data.message ||
-        `Kết nối Gemini API thành công (${data.maskedHint || keyStatus.maskedHint}).`;
-      setFeedback({ type: 'success', message: okMsg });
+        result.data.message ||
+        `Kết nối Gemini API thành công (${result.data.maskedHint || keyStatus.maskedHint}).`;
+      setFeedback({ type: 'success', code: 'OK', message: okMsg });
       onToast?.(okMsg, 'success');
-    } catch {
-      const errMsg = 'Không thể kết nối tới máy chủ để kiểm tra API key. Vui lòng thử lại.';
-      setFeedback({ type: 'error', message: errMsg });
-      onToast?.(errMsg, 'error');
     } finally {
       setIsTesting(false);
     }
@@ -177,6 +261,7 @@ export function GeminiKeySetupPanel({
     if (!trimmed) {
       setFeedback({
         type: 'error',
+        code: 'EMPTY_API_KEY',
         message: 'Vui lòng nhập Gemini API key cá nhân trước khi bấm "LƯU AN TOÀN".',
       });
       return;
@@ -185,13 +270,7 @@ export function GeminiKeySetupPanel({
     setIsSaving(true);
     setFeedback(null);
     try {
-      const headers = await getAuthBearerHeaders();
-      const resp = await fetch('/api/teacher/gemini-key/save', {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ apiKey: trimmed }),
-      });
-      const data = (await resp.json()) as {
+      const saveResult = await fetchAuthenticatedJson<{
         ok?: boolean;
         connected?: boolean;
         status?: 'connected' | 'not_connected' | 'needs_reconnect';
@@ -201,13 +280,23 @@ export function GeminiKeySetupPanel({
         usingDedicatedVaultSecret?: boolean;
         encryptionKeyVersion?: 'v1-env' | 'v1-fallback' | null;
         isProduction?: boolean;
+        code?: string;
         message?: string;
         error?: string;
-      };
+      }>('/api/teacher/gemini-key/save', {
+        method: 'POST',
+        body: { apiKey: trimmed },
+      });
 
-      if (!resp.ok || !data.ok) {
-        const errMsg = data.error || 'Không thể lưu Gemini API key. Vui lòng kiểm tra lại khóa.';
-        setFeedback({ type: 'error', message: errMsg });
+      if (!saveResult.ok || !saveResult.data?.ok) {
+        const errMsg =
+          saveResult.error ||
+          'Không thể lưu Gemini API key. Vui lòng kiểm tra lại khóa hoặc máy chủ.';
+        setFeedback({
+          type: 'error',
+          code: saveResult.code || `HTTP_${saveResult.status}`,
+          message: errMsg,
+        });
         onToast?.(errMsg, 'error');
         return;
       }
@@ -215,35 +304,36 @@ export function GeminiKeySetupPanel({
       // Xóa ngay khóa gốc khỏi state giao diện để không lưu dấu vết trên trình duyệt
       setApiKeyInput('');
       setShowKey(false);
-      setIsReplacing(false);
       setConfirmDisconnect(false);
 
-      const nextStatus: TeacherGeminiKeyStatus = {
-        loading: false,
-        loaded: true,
-        connected: true,
-        status: 'connected',
-        maskedHint: data.maskedHint || '',
-        lastVerifiedAtMs: data.lastVerifiedAtMs ?? Date.now(),
-        updatedAtMs: data.updatedAtMs ?? Date.now(),
-        usingDedicatedVaultSecret: Boolean(data.usingDedicatedVaultSecret),
-        encryptionKeyVersion: data.encryptionKeyVersion ?? null,
-        isProduction: Boolean(data.isProduction),
-      };
-      onStatusUpdated(nextStatus);
+      // Đọc lại trạng thái THẬT từ backend sau khi lưu để xác nhận đã ghi an toàn vào kho bảo mật
+      const verifiedStatus = await fetchTeacherGeminiKeyStatus();
+      onStatusUpdated(verifiedStatus);
+
+      if (!verifiedStatus.connected) {
+        const verifyErr =
+          verifiedStatus.message ||
+          'Đã gửi yêu cầu lưu nhưng chưa xác minh lại được trạng thái ĐÃ KẾT NỐI từ máy chủ.';
+        setFeedback({
+          type: 'error',
+          code: verifiedStatus.errorCode || 'POST_SAVE_VERIFY_FAILED',
+          message: verifyErr,
+        });
+        onToast?.(verifyErr, 'error');
+        return;
+      }
+
+      setIsReplacing(false);
 
       const okMsg =
-        data.message || 'Đã mã hóa và lưu an toàn Gemini API key cá nhân trên máy chủ!';
-      setFeedback({ type: 'success', message: okMsg });
+        saveResult.data.message ||
+        `Đã xác thực, mã hóa và lưu an toàn Gemini API key cá nhân (${verifiedStatus.maskedHint}). Trạng thái: ĐÃ KẾT NỐI.`;
+      setFeedback({ type: 'success', code: 'OK', message: okMsg });
       onToast?.(okMsg, 'success');
 
       if (mode === 'modal' && onClose) {
         onClose();
       }
-    } catch {
-      const errMsg = 'Lỗi kết nối máy chủ khi lưu Gemini API key. Vui lòng thử lại.';
-      setFeedback({ type: 'error', message: errMsg });
-      onToast?.(errMsg, 'error');
     } finally {
       setIsSaving(false);
     }
@@ -253,20 +343,23 @@ export function GeminiKeySetupPanel({
     setIsDisconnecting(true);
     setFeedback(null);
     try {
-      const headers = await getAuthBearerHeaders();
-      const resp = await fetch('/api/teacher/gemini-key', {
-        method: 'DELETE',
-        headers,
-      });
-      const data = (await resp.json()) as {
+      const delResult = await fetchAuthenticatedJson<{
         ok?: boolean;
         usingDedicatedVaultSecret?: boolean;
+        code?: string;
         message?: string;
         error?: string;
-      };
-      if (!resp.ok || !data.ok) {
-        const errMsg = data.error || 'Không thể ngắt kết nối Gemini API key lúc này.';
-        setFeedback({ type: 'error', message: errMsg });
+      }>('/api/teacher/gemini-key', {
+        method: 'DELETE',
+      });
+
+      if (!delResult.ok || !delResult.data?.ok) {
+        const errMsg = delResult.error || 'Không thể ngắt kết nối Gemini API key lúc này.';
+        setFeedback({
+          type: 'error',
+          code: delResult.code || `HTTP_${delResult.status}`,
+          message: errMsg,
+        });
         onToast?.(errMsg, 'error');
         return;
       }
@@ -276,27 +369,14 @@ export function GeminiKeySetupPanel({
       setConfirmDisconnect(false);
       setIsReplacing(true);
 
-      onStatusUpdated({
-        loading: false,
-        loaded: true,
-        connected: false,
-        status: 'not_connected',
-        maskedHint: '',
-        lastVerifiedAtMs: null,
-        updatedAtMs: null,
-        usingDedicatedVaultSecret: Boolean(data.usingDedicatedVaultSecret),
-        encryptionKeyVersion: null,
-        isProduction: Boolean(keyStatus.isProduction),
-      });
+      const refreshed = await fetchTeacherGeminiKeyStatus();
+      onStatusUpdated(refreshed);
 
       const okMsg =
-        data.message || 'Đã ngắt kết nối và xóa Gemini API key cá nhân khỏi kho bảo mật.';
-      setFeedback({ type: 'info', message: okMsg });
+        delResult.data.message ||
+        'Đã ngắt kết nối và xóa Gemini API key cá nhân khỏi kho bảo mật.';
+      setFeedback({ type: 'info', code: 'OK', message: okMsg });
       onToast?.(okMsg, 'success');
-    } catch {
-      const errMsg = 'Lỗi kết nối máy chủ khi ngắt kết nối Gemini API key.';
-      setFeedback({ type: 'error', message: errMsg });
-      onToast?.(errMsg, 'error');
     } finally {
       setIsDisconnecting(false);
     }
@@ -452,16 +532,23 @@ export function GeminiKeySetupPanel({
                 )}
               </div>
             ) : (
-              <p className="text-xs text-slate-700">
-                {keyStatus.message ||
-                  'Bạn vẫn sử dụng bình thường mọi chức năng quản lý lớp (hồ sơ học sinh, điểm danh, thi đua, bảng điểm vnEdu, sổ quỹ, phân quyền 8 vị trí). Chỉ cần kết nối Gemini API key cá nhân khi muốn dùng trợ lý AI.'}
-              </p>
+              <div className="space-y-1.5">
+                {keyStatus.errorCode && (
+                  <div className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-rose-100 border border-rose-300 text-rose-800 text-[11px] font-mono font-bold">
+                    Mã lỗi: {keyStatus.errorCode}
+                  </div>
+                )}
+                <p className="text-xs text-slate-700 leading-relaxed">
+                  {keyStatus.message ||
+                    'Bạn vẫn sử dụng bình thường mọi chức năng quản lý lớp (hồ sơ học sinh, điểm danh, thi đua, bảng điểm vnEdu, sổ quỹ, phân quyền 8 vị trí). Chỉ cần kết nối Gemini API key cá nhân khi muốn dùng trợ lý AI.'}
+                </p>
+              </div>
             )}
           </div>
         </div>
 
-        {/* Nút thao tác nhanh khi ĐÃ kết nối: KIỂM TRA KẾT NỐI / THAY API KEY / NGẮT KẾT NỐI */}
-        {keyStatus.connected && (
+        {/* Nút thao tác nhanh */}
+        {keyStatus.connected ? (
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
@@ -489,6 +576,18 @@ export function GeminiKeySetupPanel({
             >
               <Unlink className="w-3.5 h-3.5" />
               <span>NGẮT KẾT NỐI</span>
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={isReloadingStatus || isSaving || isTesting}
+              onClick={handleReloadStatusClick}
+              className="px-3 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 text-xs font-bold flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isReloadingStatus ? 'animate-spin' : ''}`} />
+              <span>{isReloadingStatus ? 'Đang tải...' : 'Tải lại trạng thái'}</span>
             </button>
           </div>
         )}
@@ -710,7 +809,14 @@ export function GeminiKeySetupPanel({
                     }`}
                   />
                 )}
-                <span>{feedback.message}</span>
+                <div className="space-y-1">
+                  {feedback.type === 'error' && feedback.code && (
+                    <div className="inline-block px-2 py-0.5 rounded bg-rose-100 border border-rose-300 text-rose-800 text-[11px] font-mono font-bold">
+                      Mã lỗi: {feedback.code}
+                    </div>
+                  )}
+                  <div>{feedback.message}</div>
+                </div>
               </div>
             )}
 

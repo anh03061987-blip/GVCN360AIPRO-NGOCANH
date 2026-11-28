@@ -1,6 +1,39 @@
 import crypto from 'node:crypto';
-import { GoogleGenAI, ThinkingLevel } from '@google/genai';
-import firebaseConfig from '../../firebase-applet-config.json' with { type: 'json' };
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  GoogleGenAI,
+  ThinkingLevel,
+  type GenerateContentParameters,
+  type GenerateContentResponse,
+} from '@google/genai';
+
+export interface FirebaseAppletConfig {
+  projectId: string;
+  apiKey: string;
+  firestoreDatabaseId?: string;
+}
+
+export function loadFirebaseAppletConfig(): FirebaseAppletConfig {
+  const candidates = [
+    path.resolve(process.cwd(), 'firebase-applet-config.json'),
+    new URL('../../firebase-applet-config.json', import.meta.url),
+    new URL('../firebase-applet-config.json', import.meta.url),
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const raw = fs.readFileSync(candidate, 'utf8');
+      return JSON.parse(raw) as FirebaseAppletConfig;
+    } catch {
+      // Try next candidate path
+    }
+  }
+
+  throw new Error('Không tìm thấy tệp cấu hình firebase-applet-config.json trên máy chủ.');
+}
+
+const firebaseConfig = loadFirebaseAppletConfig();
 
 export const GEMINI_MODEL = 'gemini-4-hydrogen';
 export const VAULT_PROVIDER = 'gemini';
@@ -35,13 +68,42 @@ export interface PublicGeminiKeyStatus {
   usingDedicatedVaultSecret: boolean;
   encryptionKeyVersion: 'v1-env' | 'v1-fallback' | null;
   isProduction: boolean;
+  code?: string;
   message?: string;
+}
+
+export class VaultStorageError extends Error {
+  readonly httpStatus: number;
+  readonly code: string;
+
+  constructor(message: string, httpStatus: number, code: string) {
+    super(message);
+    this.name = 'VaultStorageError';
+    this.httpStatus = httpStatus;
+    this.code = code;
+  }
+}
+
+export function sanitizeForLog(input: unknown): string {
+  const text = input instanceof Error ? input.message : String(input ?? 'Unknown error');
+  return text
+    .replace(/AIza[0-9A-Za-z_-]{15,}/g, '[REDACTED_API_KEY]')
+    .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, 'Bearer [REDACTED_TOKEN]')
+    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[REDACTED_JWT]')
+    .slice(0, 300);
 }
 
 const MIN_SECRET_LENGTH = 16;
 
 export function isProductionRuntime(): boolean {
-  return (process.env.NODE_ENV || '').trim().toLowerCase() === 'production';
+  return (
+    (process.env.NODE_ENV || '').trim().toLowerCase() === 'production' ||
+    Boolean(process.env.VERCEL)
+  );
+}
+
+export function isVercelPreviewRuntime(): boolean {
+  return (process.env.VERCEL_ENV || '').trim().toLowerCase() === 'preview';
 }
 
 export function isUsingDedicatedVaultSecret(): boolean {
@@ -67,15 +129,19 @@ function getMasterKeyForVersion(
   if (version === 'v1-env') {
     const secret = (process.env.API_KEY_ENCRYPTION_SECRET || '').trim();
     if (secret.length < MIN_SECRET_LENGTH) {
-      throw new Error(
-        'Khóa mã hóa máy chủ (API_KEY_ENCRYPTION_SECRET) hiện chưa được cấu hình hoặc đã bị gỡ. Vui lòng thiết lập lại API_KEY_ENCRYPTION_SECRET hoặc kết nối lại Gemini API key cá nhân.'
+      throw new VaultStorageError(
+        'Biến môi trường API_KEY_ENCRYPTION_SECRET hiện chưa được cấu hình hoặc đã bị thay đổi trên máy chủ. Vui lòng kiểm tra cấu hình Secrets/Environment Variables.',
+        503,
+        'PRODUCTION_ENCRYPTION_SECRET_REQUIRED'
       );
     }
     return crypto.createHash('sha256').update(secret, 'utf8').digest();
   }
   if (isProductionRuntime() && !options?.allowFallbackInProd) {
-    throw new Error(
-      'Môi trường vận hành chính thức (production) không cho phép sử dụng khóa mã hóa dự phòng v1-fallback. Vui lòng thiết lập API_KEY_ENCRYPTION_SECRET trong Settings > Secrets.'
+    throw new VaultStorageError(
+      'Môi trường vận hành chính thức (production/Vercel) không cho phép dùng khóa mã hóa dự phòng v1-fallback. Vui lòng thiết lập biến môi trường API_KEY_ENCRYPTION_SECRET.',
+      503,
+      'PRODUCTION_ENCRYPTION_SECRET_REQUIRED'
     );
   }
   return getFallbackMasterKeyMaterial();
@@ -138,17 +204,27 @@ export function encryptPersonalApiKey(
   nowMs = Date.now()
 ): EncryptedApiKeyEnvelope {
   if (!uid || !uid.trim()) {
-    throw new Error('Thiếu mã định danh giáo viên (UID) để mã hóa API key.');
+    throw new VaultStorageError(
+      'Thiếu mã định danh giáo viên (UID) để mã hóa API key.',
+      400,
+      'MISSING_UID'
+    );
   }
   const formatCheck = validatePersonalGeminiApiKeyFormat(rawApiKey);
   if (!formatCheck.valid) {
-    throw new Error(formatCheck.error || 'Gemini API key không hợp lệ.');
+    throw new VaultStorageError(
+      formatCheck.error || 'Gemini API key không hợp lệ.',
+      400,
+      'INVALID_KEY_FORMAT'
+    );
   }
 
   const hasDedicatedSecret = isUsingDedicatedVaultSecret();
   if (!hasDedicatedSecret && isProductionRuntime()) {
-    throw new Error(
-      'Môi trường vận hành chính thức (production) bắt buộc cấu hình biến bí mật API_KEY_ENCRYPTION_SECRET (tối thiểu 16 ký tự, khuyến nghị ≥ 32 ký tự) trong Settings > Secrets trước khi lưu API key cá nhân.'
+    throw new VaultStorageError(
+      'Môi trường vận hành chính thức (production/Vercel) bắt buộc cấu hình biến bí mật API_KEY_ENCRYPTION_SECRET (tối thiểu 16 ký tự, khuyến nghị ≥ 32 ký tự) trước khi lưu API key cá nhân.',
+      503,
+      'PRODUCTION_ENCRYPTION_SECRET_REQUIRED'
     );
   }
 
@@ -186,10 +262,18 @@ export function decryptPersonalApiKey(
   options?: { allowFallbackInProd?: boolean }
 ): string {
   if (!uid || envelope.ownerUid !== uid) {
-    throw new Error('Không được phép giải mã khóa của tài khoản giáo viên khác.');
+    throw new VaultStorageError(
+      'Không được phép giải mã khóa của tài khoản giáo viên khác.',
+      403,
+      'VAULT_UID_MISMATCH'
+    );
   }
   if (envelope.alg !== VAULT_ALGORITHM || envelope.provider !== VAULT_PROVIDER) {
-    throw new Error('Cấu trúc bản ghi khóa mã hóa không hợp lệ.');
+    throw new VaultStorageError(
+      'Cấu trúc bản ghi khóa mã hóa không hợp lệ.',
+      500,
+      'VAULT_CORRUPT_RECORD'
+    );
   }
   const keyVersion = envelope.keyVersion === 'v1-env' ? 'v1-env' : 'v1-fallback';
   const masterKey = getMasterKeyForVersion(keyVersion, options);
@@ -200,13 +284,25 @@ export function decryptPersonalApiKey(
   const dek = deriveTeacherDek(masterKey, uid, salt, keyVersion);
   const aad = buildVaultAad(uid);
 
-  const decipher = crypto.createDecipheriv(VAULT_ALGORITHM, dek, iv);
-  decipher.setAAD(aad);
-  decipher.setAuthTag(authTag);
-
-  const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  let plaintext = '';
+  try {
+    const decipher = crypto.createDecipheriv(VAULT_ALGORITHM, dek, iv);
+    decipher.setAAD(aad);
+    decipher.setAuthTag(authTag);
+    plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8');
+  } catch {
+    throw new VaultStorageError(
+      'Không thể giải mã Gemini API key cá nhân bằng khóa mã hóa máy chủ hiện tại (API_KEY_ENCRYPTION_SECRET không khớp hoặc đã thay đổi). Bản mã hóa và dữ liệu hiện có trên Firestore vẫn được giữ nguyên an toàn.',
+      428,
+      'GEMINI_KEY_RECONNECT_REQUIRED'
+    );
+  }
   if (!plaintext) {
-    throw new Error('Khóa giải mã rỗng. Vui lòng kết nối lại Gemini API key cá nhân.');
+    throw new VaultStorageError(
+      'Khóa giải mã rỗng. Vui lòng kết nối lại Gemini API key cá nhân.',
+      428,
+      'VAULT_EMPTY_PLAINTEXT'
+    );
   }
   return plaintext;
 }
@@ -222,20 +318,240 @@ export function createGeminiClientWithPersonalKey(personalApiKey: string): Googl
   });
 }
 
-export function classifyGeminiApiError(error: unknown): {
+export class GeminiResponseParseError extends Error {
+  constructor(message = 'Phản hồi JSON từ Gemini không hợp lệ hoặc bị rỗng.') {
+    super(message);
+    this.name = 'GeminiResponseParseError';
+  }
+}
+
+export class GeminiSafetyBlockedError extends Error {
+  readonly finishReason: string;
+
+  constructor(finishReason: string) {
+    super(`Nội dung bị bộ lọc an toàn của Google Gemini chặn (${finishReason}).`);
+    this.name = 'GeminiSafetyBlockedError';
+    this.finishReason = finishReason;
+  }
+}
+
+export function extractUpstreamErrorStatus(error: unknown): number | null {
+  if (typeof error === 'object' && error !== null) {
+    const obj = error as {
+      status?: unknown;
+      statusCode?: unknown;
+      code?: unknown;
+      response?: { status?: unknown };
+    };
+    for (const candidate of [obj.status, obj.statusCode, obj.response?.status, obj.code]) {
+      if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 100 && candidate < 600) {
+        return Math.trunc(candidate);
+      }
+      if (typeof candidate === 'string' && /^\d{3}$/.test(candidate.trim())) {
+        return Number(candidate.trim());
+      }
+    }
+  }
+  const msg = error instanceof Error ? error.message : String(error || '');
+  const jsonCodeMatch = msg.match(/"code"\s*:\s*(\d{3})/);
+  if (jsonCodeMatch) return Number(jsonCodeMatch[1]);
+  const statusMatch = msg.match(/\bstatus(?:\s*code)?\s*[:=]\s*(\d{3})\b/i);
+  if (statusMatch) return Number(statusMatch[1]);
+  return null;
+}
+
+export function parseGeminiJsonResponse<T>(rawText: string): T {
+  const cleaned = String(rawText || '')
+    .replace(/^\uFEFF/, '')
+    .trim();
+  if (!cleaned) {
+    throw new GeminiResponseParseError('Google Gemini trả về nội dung rỗng.');
+  }
+
+  const unfenced = cleaned
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/i, '')
+    .trim();
+
+  try {
+    return JSON.parse(unfenced) as T;
+  } catch {
+    // Fallback: extract the outermost balanced JSON object when model adds brief wrapper text
+    const startIdx = unfenced.indexOf('{');
+    const endIdx = unfenced.lastIndexOf('}');
+    if (startIdx !== -1 && endIdx > startIdx) {
+      const candidate = unfenced.slice(startIdx, endIdx + 1);
+      try {
+        return JSON.parse(candidate) as T;
+      } catch {
+        // Fall through to typed parse error
+      }
+    }
+    throw new GeminiResponseParseError('Phản hồi từ Google Gemini chưa đúng định dạng JSON.');
+  }
+}
+
+export function isRetryableGeminiError(error: unknown): boolean {
+  if (error instanceof GeminiSafetyBlockedError) {
+    return false;
+  }
+  if (error instanceof GeminiResponseParseError || error instanceof SyntaxError) {
+    return true;
+  }
+
+  const status = extractUpstreamErrorStatus(error);
+  const rawMessage = error instanceof Error ? error.message : String(error || '');
+  const lower = rawMessage.toLowerCase();
+
+  // Never retry auth, permission, invalid key, model not found, bad request, or quota exhaustion
+  if (
+    status === 400 ||
+    status === 401 ||
+    status === 403 ||
+    status === 404 ||
+    status === 429 ||
+    lower.includes('api_key_invalid') ||
+    lower.includes('api key not valid') ||
+    lower.includes('permission_denied') ||
+    lower.includes('resource_exhausted') ||
+    lower.includes('not_found') ||
+    lower.includes('invalid_argument') ||
+    lower.includes('safety') ||
+    lower.includes('prohibited_content')
+  ) {
+    return false;
+  }
+
+  return (
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504 ||
+    lower.includes('unavailable') ||
+    lower.includes('internal') ||
+    lower.includes('overloaded') ||
+    lower.includes('high demand') ||
+    lower.includes('deadline_exceeded') ||
+    lower.includes('timeout') ||
+    lower.includes('etimedout') ||
+    lower.includes('econnreset') ||
+    lower.includes('socket hang up') ||
+    lower.includes('fetch failed') ||
+    lower.includes('eai_again')
+  );
+}
+
+function delayMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function assertNotSafetyBlocked(response: GenerateContentResponse): void {
+  const blockReason = String(response.promptFeedback?.blockReason || '').toUpperCase();
+  if (blockReason && blockReason !== 'BLOCK_REASON_UNSPECIFIED') {
+    throw new GeminiSafetyBlockedError(blockReason);
+  }
+  const finishReason = String(response.candidates?.[0]?.finishReason || '').toUpperCase();
+  if (
+    finishReason === 'SAFETY' ||
+    finishReason === 'PROHIBITED_CONTENT' ||
+    finishReason === 'BLOCKLIST' ||
+    finishReason === 'SPII' ||
+    finishReason === 'RECITATION'
+  ) {
+    throw new GeminiSafetyBlockedError(finishReason);
+  }
+}
+
+export async function generateContentWithRetry(
+  ai: GoogleGenAI,
+  params: GenerateContentParameters,
+  maxAttempts = 3
+): Promise<GenerateContentResponse> {
+  let lastError: unknown;
+  const attempts = Math.max(1, Math.min(maxAttempts, 4));
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const response = await ai.models.generateContent(params);
+      assertNotSafetyBlocked(response);
+      return response;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isRetryableGeminiError(error)) {
+        throw error;
+      }
+      const backoff = 700 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+      await delayMs(backoff);
+    }
+  }
+  throw lastError;
+}
+
+export async function generateJsonWithRetry<T>(
+  ai: GoogleGenAI,
+  params: GenerateContentParameters,
+  validateFn?: (parsed: T) => boolean,
+  maxAttempts = 3
+): Promise<T> {
+  let lastError: unknown;
+  const attempts = Math.max(1, Math.min(maxAttempts, 4));
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const response = await ai.models.generateContent(params);
+      assertNotSafetyBlocked(response);
+      const parsed = parseGeminiJsonResponse<T>(response.text || '');
+      if (validateFn && !validateFn(parsed)) {
+        throw new GeminiResponseParseError('Phản hồi JSON từ Google Gemini thiếu trường nội dung bắt buộc.');
+      }
+      return parsed;
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts || !isRetryableGeminiError(error)) {
+        throw error;
+      }
+      const backoff = 700 * Math.pow(2, attempt - 1) + Math.floor(Math.random() * 250);
+      await delayMs(backoff);
+    }
+  }
+  throw lastError;
+}
+
+export function classifyGeminiApiError(
+  error: unknown,
+  context: 'verify' | 'generate' = 'generate'
+): {
   status: number;
   code: string;
   message: string;
 } {
+  if (error instanceof GeminiSafetyBlockedError) {
+    return {
+      status: 422,
+      code: 'GEMINI_SAFETY_BLOCKED',
+      message:
+        'Nội dung đầu vào chạm bộ lọc an toàn của Google Gemini. Vui lòng rà soát lại ghi chú (tránh từ ngữ nhạy cảm) rồi thử lại.',
+    };
+  }
+
+  if (error instanceof GeminiResponseParseError || error instanceof SyntaxError) {
+    return {
+      status: 502,
+      code: 'GEMINI_INVALID_RESPONSE',
+      message:
+        'Google Gemini trả về định dạng chưa chuẩn ở lượt gọi này. Vui lòng bấm tạo lại sau vài giây.',
+    };
+  }
+
+  const upstreamStatus = extractUpstreamErrorStatus(error);
   const rawMessage = error instanceof Error ? error.message : String(error || '');
   const lower = rawMessage.toLowerCase();
 
   if (
+    upstreamStatus === 401 ||
     lower.includes('api_key_invalid') ||
     lower.includes('api key not valid') ||
     lower.includes('invalid api key') ||
-    lower.includes('unauthenticated') ||
-    lower.includes('401')
+    lower.includes('api_key_expired') ||
+    lower.includes('unauthenticated')
   ) {
     return {
       status: 400,
@@ -246,30 +562,111 @@ export function classifyGeminiApiError(error: unknown): {
   }
 
   if (
+    upstreamStatus === 403 ||
     lower.includes('permission_denied') ||
     lower.includes('permission denied') ||
-    lower.includes('403') ||
     lower.includes('forbidden')
   ) {
     return {
       status: 403,
       code: 'GEMINI_KEY_FORBIDDEN',
       message:
-        'Gemini API key không có quyền truy cập mô hình Gemini API. Vui lòng kiểm tra dự án Google AI Studio của bạn.',
+        'Gemini API key không có quyền truy cập mô hình Gemini API (hoặc API chưa được bật trong dự án Google AI Studio).',
     };
   }
 
   if (
+    upstreamStatus === 429 ||
     lower.includes('resource_exhausted') ||
     lower.includes('quota') ||
     lower.includes('rate limit') ||
-    lower.includes('429')
+    lower.includes('too many requests')
   ) {
     return {
       status: 429,
       code: 'GEMINI_QUOTA_EXCEEDED',
       message:
-        'Gemini API key cá nhân của bạn đã vượt hạn mức lượt gọi tạm thời hoặc hết quota trên Google AI Studio. Vui lòng thử lại sau hoặc đổi API key.',
+        'Gemini API key cá nhân của bạn đã vượt hạn mức lượt gọi tạm thời hoặc hết quota trên Google AI Studio (HTTP 429). Vui lòng thử lại sau hoặc kiểm tra hạn mức/billing.',
+    };
+  }
+
+  if (
+    upstreamStatus === 404 ||
+    lower.includes('not_found') ||
+    lower.includes('is not found')
+  ) {
+    return {
+      status: 404,
+      code: 'GEMINI_MODEL_NOT_FOUND',
+      message:
+        'Không tìm thấy mô hình Gemini được yêu cầu cho API key này (HTTP 404). Vui lòng kiểm tra phiên bản mô hình trên hệ thống.',
+    };
+  }
+
+  if (
+    lower.includes('safety') ||
+    lower.includes('prohibited_content') ||
+    lower.includes('blocklist') ||
+    lower.includes('harm_category')
+  ) {
+    return {
+      status: 422,
+      code: 'GEMINI_SAFETY_BLOCKED',
+      message:
+        'Nội dung yêu cầu bị bộ lọc an toàn của Google Gemini từ chối. Vui lòng điều chỉnh ngắn gọn, trung lập hơn rồi thử lại.',
+    };
+  }
+
+  if (upstreamStatus === 400 || lower.includes('invalid_argument')) {
+    return {
+      status: 400,
+      code: 'GEMINI_BAD_REQUEST',
+      message:
+        'Yêu cầu gửi tới Google Gemini API chưa hợp lệ (HTTP 400). Vui lòng rút gọn ghi chú bổ sung hoặc thử lại.',
+    };
+  }
+
+  if (
+    upstreamStatus === 503 ||
+    lower.includes('unavailable') ||
+    lower.includes('overloaded') ||
+    lower.includes('high demand')
+  ) {
+    return {
+      status: 503,
+      code: 'GEMINI_SERVICE_UNAVAILABLE',
+      message:
+        'Máy chủ Google Gemini API đang quá tải tạm thời (HTTP 503). Hệ thống đã tự thử lại nhưng chưa thành công — vui lòng bấm thử lại sau vài giây.',
+    };
+  }
+
+  if (
+    upstreamStatus === 504 ||
+    lower.includes('deadline_exceeded') ||
+    lower.includes('etimedout') ||
+    lower.includes('timeout')
+  ) {
+    return {
+      status: 504,
+      code: 'GEMINI_TIMEOUT',
+      message:
+        'Yêu cầu tới Google Gemini API bị quá thời gian chờ. Vui lòng bấm thử lại.',
+    };
+  }
+
+  if (
+    lower.includes('fetch failed') ||
+    lower.includes('enotfound') ||
+    lower.includes('econnreset') ||
+    lower.includes('econnrefused') ||
+    lower.includes('socket hang up') ||
+    lower.includes('network')
+  ) {
+    return {
+      status: 503,
+      code: 'GEMINI_NETWORK_ERROR',
+      message:
+        'Lỗi mạng khi máy chủ kết nối tới dịch vụ Google Gemini API. Vui lòng thử lại sau ít phút.',
     };
   }
 
@@ -277,7 +674,9 @@ export function classifyGeminiApiError(error: unknown): {
     status: 502,
     code: 'GEMINI_UPSTREAM_ERROR',
     message:
-      'Không thể kết nối tới dịch vụ Gemini API bằng khóa cá nhân lúc này. Vui lòng thử lại sau ít phút.',
+      context === 'verify'
+        ? 'Dịch vụ Google Gemini API tạm thời phản hồi lỗi khi xác thực khóa cá nhân. Vui lòng thử lại sau ít phút.'
+        : 'Dịch vụ Google Gemini API tạm thời gặp sự cố xử lý phản hồi. Vui lòng bấm thử lại sau ít giây.',
   };
 }
 
@@ -296,14 +695,17 @@ export async function verifyPersonalGeminiApiKeyLive(
 
   try {
     const ai = createGeminiClientWithPersonalKey(formatCheck.cleaned);
-    await ai.models.generateContent({
-      model: GEMINI_MODEL,
-      contents: 'Trả lời đúng 1 từ: OK',
-      config: {
-        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-        maxOutputTokens: 8,
+    await generateContentWithRetry(
+      ai,
+      {
+        model: GEMINI_MODEL,
+        contents: 'Trả lời đúng 1 từ: OK',
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+        },
       },
-    });
+      2
+    );
     return {
       valid: true,
       status: 200,
@@ -311,7 +713,7 @@ export async function verifyPersonalGeminiApiKeyLive(
       message: 'Kết nối Gemini API cá nhân thành công! Khóa hợp lệ và sẵn sàng sử dụng.',
     };
   } catch (error) {
-    const classified = classifyGeminiApiError(error);
+    const classified = classifyGeminiApiError(error, 'verify');
     return {
       valid: false,
       status: classified.status,
@@ -339,6 +741,38 @@ function getVaultDocumentName(uid: string): string {
   const projectId = firebaseConfig.projectId;
   const dbId = firebaseConfig.firestoreDatabaseId || '(default)';
   return `projects/${projectId}/databases/${dbId}/documents/users/${uid}/ai_key_vault/${VAULT_DOC_ID}`;
+}
+
+function mapFirestoreHttpFailure(
+  actionLabel: string,
+  status: number
+): VaultStorageError {
+  if (status === 401) {
+    return new VaultStorageError(
+      `Phiên đăng nhập Firebase đã hết hạn khi ${actionLabel}. Vui lòng đăng nhập lại.`,
+      401,
+      'FIRESTORE_AUTH_EXPIRED'
+    );
+  }
+  if (status === 403) {
+    return new VaultStorageError(
+      `Firestore từ chối quyền truy cập khi ${actionLabel} (HTTP 403). Vui lòng kiểm tra quyền giáo viên đã được phê duyệt và quy tắc bảo mật firestore.rules.`,
+      403,
+      'FIRESTORE_PERMISSION_DENIED'
+    );
+  }
+  if (status === 429) {
+    return new VaultStorageError(
+      `Cơ sở dữ liệu Firestore đang chạm hạn mức lượt truy cập khi ${actionLabel} (HTTP 429). Vui lòng thử lại sau.`,
+      429,
+      'FIRESTORE_QUOTA_EXCEEDED'
+    );
+  }
+  return new VaultStorageError(
+    `Lỗi lưu trữ Firestore khi ${actionLabel} (HTTP ${status}). Vui lòng thử lại sau.`,
+    status >= 500 ? 502 : 500,
+    'FIRESTORE_STORAGE_ERROR'
+  );
 }
 
 interface FirestoreRestDoc {
@@ -405,19 +839,28 @@ export async function getTeacherVaultDocRest(
   uid: string,
   idToken: string
 ): Promise<StoredVaultRecord | null> {
-  const resp = await fetch(getVaultDocumentUrl(uid), {
-    method: 'GET',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      Accept: 'application/json',
-    },
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(getVaultDocumentUrl(uid), {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        Accept: 'application/json',
+      },
+    });
+  } catch {
+    throw new VaultStorageError(
+      'Lỗi mạng khi máy chủ đọc trạng thái khóa bảo mật từ Firestore.',
+      503,
+      'FIRESTORE_NETWORK_ERROR'
+    );
+  }
 
   if (resp.status === 404) {
     return null;
   }
   if (!resp.ok) {
-    throw new Error(`Không thể đọc trạng thái kho khóa bảo mật (HTTP ${resp.status}).`);
+    throw mapFirestoreHttpFailure('đọc trạng thái kho khóa bảo mật', resp.status);
   }
 
   const data = (await resp.json()) as FirestoreRestDoc;
@@ -472,37 +915,52 @@ export async function upsertTeacherVaultDocRest(
     ],
   };
 
-  const resp = await fetch(commitUrl, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(writePayload),
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(commitUrl, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify(writePayload),
+    });
+  } catch {
+    throw new VaultStorageError(
+      'Lỗi mạng khi máy chủ lưu khóa mã hóa vào Firestore.',
+      503,
+      'FIRESTORE_NETWORK_ERROR'
+    );
+  }
 
   if (!resp.ok) {
-    const errText = await resp.text().catch(() => '');
-    throw new Error(
-      `Không thể lưu khóa mã hóa vào kho bảo mật (HTTP ${resp.status})${errText ? ': ' + errText.slice(0, 160) : ''}`
-    );
+    throw mapFirestoreHttpFailure('lưu khóa mã hóa vào kho bảo mật', resp.status);
   }
 }
 
 export async function deleteTeacherVaultDocRest(uid: string, idToken: string): Promise<void> {
-  const resp = await fetch(getVaultDocumentUrl(uid), {
-    method: 'DELETE',
-    headers: {
-      Authorization: `Bearer ${idToken}`,
-      Accept: 'application/json',
-    },
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(getVaultDocumentUrl(uid), {
+      method: 'DELETE',
+      headers: {
+        Authorization: `Bearer ${idToken}`,
+        Accept: 'application/json',
+      },
+    });
+  } catch {
+    throw new VaultStorageError(
+      'Lỗi mạng khi máy chủ ngắt kết nối khóa bảo mật trên Firestore.',
+      503,
+      'FIRESTORE_NETWORK_ERROR'
+    );
+  }
 
   if (resp.status === 404 || resp.ok) {
     return;
   }
-  throw new Error(`Không thể xóa kết nối Gemini API key khỏi kho bảo mật (HTTP ${resp.status}).`);
+  throw mapFirestoreHttpFailure('xóa kết nối Gemini API key khỏi kho bảo mật', resp.status);
 }
 
 export async function resolveAndMigrateTeacherApiKey(
@@ -520,12 +978,23 @@ export async function resolveAndMigrateTeacherApiKey(
   if (record.keyVersion === 'v1-fallback') {
     if (!hasDedicatedSecret) {
       if (inProduction) {
-        throw new Error(
-          'Môi trường vận hành chính thức (production) không cho phép giải mã bằng khóa dự phòng v1-fallback. Vui lòng thiết lập API_KEY_ENCRYPTION_SECRET trong Settings > Secrets; bản ghi khóa cũ vẫn được giữ nguyên an toàn.'
+        throw new VaultStorageError(
+          'Môi trường vận hành chính thức (production/Vercel) không cho phép giải mã bằng khóa dự phòng v1-fallback. Vui lòng thiết lập API_KEY_ENCRYPTION_SECRET trong Environment Variables / Secrets; bản ghi khóa cũ vẫn được giữ nguyên an toàn.',
+          503,
+          'PRODUCTION_ENCRYPTION_SECRET_REQUIRED'
         );
       }
       const apiKey = decryptPersonalApiKey(uid, record);
       return { apiKey, record, migrated: false };
+    }
+
+    // Trên Vercel Preview, tuyệt đối không tự ghi đè bản ghi v1-fallback lên Firestore khi đang kiểm thử secret
+    if (isVercelPreviewRuntime()) {
+      throw new VaultStorageError(
+        'Bản ghi khóa hiện tại đang ở định dạng v1-fallback. Môi trường Vercel Preview không tự ghi đè dữ liệu Firestore để bảo toàn bản ghi gốc.',
+        428,
+        'PREVIEW_READONLY_MIGRATION_BLOCKED'
+      );
     }
 
     // API_KEY_ENCRYPTION_SECRET đã được cấu hình: giải mã khóa cũ (vẫn kiểm tra chặt ownerUid, AAD, authTag)
@@ -550,8 +1019,10 @@ export async function resolveAndMigrateTeacherApiKey(
       };
     } catch {
       if (inProduction) {
-        throw new Error(
-          'Không thể nâng cấp bản ghi khóa mã hóa sang chuẩn bảo mật API_KEY_ENCRYPTION_SECRET. Bản ghi cũ vẫn được giữ nguyên; vui lòng thử lại hoặc kết nối lại Gemini API key cá nhân.'
+        throw new VaultStorageError(
+          'Không thể nâng cấp bản ghi khóa mã hóa sang chuẩn bảo mật API_KEY_ENCRYPTION_SECRET. Bản ghi cũ vẫn được giữ nguyên; vui lòng thử lại hoặc kết nối lại Gemini API key cá nhân.',
+          502,
+          'VAULT_MIGRATION_FAILED'
         );
       }
       return { apiKey: plaintext, record, migrated: false };
@@ -562,10 +1033,29 @@ export async function resolveAndMigrateTeacherApiKey(
   return { apiKey, record, migrated: false };
 }
 
-export function buildPublicVaultStatus(record: StoredVaultRecord | null, uid: string): PublicGeminiKeyStatus {
+export function buildPublicVaultStatus(
+  record: StoredVaultRecord | null,
+  uid: string
+): PublicGeminiKeyStatus {
   const usingDedicatedVaultSecret = isUsingDedicatedVaultSecret();
   const isProduction = isProductionRuntime();
+
   if (!record) {
+    if (isProduction && !usingDedicatedVaultSecret) {
+      return {
+        connected: false,
+        status: 'not_connected',
+        maskedHint: '',
+        lastVerifiedAtMs: null,
+        updatedAtMs: null,
+        usingDedicatedVaultSecret,
+        encryptionKeyVersion: null,
+        isProduction,
+        code: 'PRODUCTION_ENCRYPTION_SECRET_REQUIRED',
+        message:
+          'Máy chủ vận hành chính thức chưa có biến môi trường API_KEY_ENCRYPTION_SECRET. Quản trị viên cần thêm biến này trên Vercel (Settings → Environment Variables) hoặc AI Studio Secrets trước khi lưu API key cá nhân.',
+      };
+    }
     return {
       connected: false,
       status: 'not_connected',
@@ -588,8 +1078,25 @@ export function buildPublicVaultStatus(record: StoredVaultRecord | null, uid: st
       usingDedicatedVaultSecret,
       encryptionKeyVersion: record.keyVersion,
       isProduction,
+      code: 'PRODUCTION_ENCRYPTION_SECRET_REQUIRED',
       message:
-        'Môi trường vận hành chính thức (production) không cho phép dùng khóa dự phòng v1-fallback. Vui lòng thiết lập API_KEY_ENCRYPTION_SECRET trong Settings > Secrets (khóa đã lưu của giáo viên vẫn được giữ nguyên an toàn để tự động nâng cấp).',
+        'Môi trường vận hành chính thức (production/Vercel) không cho phép dùng khóa dự phòng v1-fallback. Vui lòng thiết lập biến môi trường API_KEY_ENCRYPTION_SECRET (khóa đã lưu của giáo viên vẫn được giữ nguyên an toàn để tự động nâng cấp).',
+    };
+  }
+
+  if (record.keyVersion === 'v1-fallback' && isVercelPreviewRuntime()) {
+    return {
+      connected: false,
+      status: 'needs_reconnect',
+      maskedHint: record.maskedHint,
+      lastVerifiedAtMs: record.lastVerifiedAtMs || null,
+      updatedAtMs: record.updatedAtMs || null,
+      usingDedicatedVaultSecret,
+      encryptionKeyVersion: record.keyVersion,
+      isProduction,
+      code: 'PREVIEW_READONLY_V1_FALLBACK',
+      message:
+        'Bản ghi trên Firestore hiện đang ở phiên bản v1-fallback (chưa mã hóa bằng API_KEY_ENCRYPTION_SECRET). Môi trường Vercel Preview giữ nguyên bản ghi gốc và không tự ghi đè Firestore.',
     };
   }
 
@@ -616,10 +1123,14 @@ export function buildPublicVaultStatus(record: StoredVaultRecord | null, uid: st
       usingDedicatedVaultSecret,
       encryptionKeyVersion: record.keyVersion,
       isProduction,
+      code:
+        record.keyVersion === 'v1-env' && !usingDedicatedVaultSecret
+          ? 'PRODUCTION_ENCRYPTION_SECRET_REQUIRED'
+          : 'KEY_RECONNECT_REQUIRED',
       message:
         record.keyVersion === 'v1-env' && !usingDedicatedVaultSecret
-          ? 'Biến bí mật API_KEY_ENCRYPTION_SECRET hiện chưa được cấu hình hoặc đã bị thay đổi. Vui lòng kiểm tra Settings > Secrets hoặc kết nối lại Gemini API key cá nhân.'
-          : 'Khóa mã hóa máy chủ đã thay đổi. Vui lòng nhập lại Gemini API key cá nhân.',
+          ? 'Biến bí mật API_KEY_ENCRYPTION_SECRET hiện chưa được cấu hình trên máy chủ. Bản mã hóa gốc trên Firestore vẫn được giữ nguyên an toàn.'
+          : 'Không thể giải mã Gemini API key cá nhân bằng API_KEY_ENCRYPTION_SECRET hiện tại (khóa không khớp hoặc đã thay đổi). Bản mã hóa và metadata gốc trên Firestore vẫn được giữ nguyên an toàn.',
     };
   }
 }

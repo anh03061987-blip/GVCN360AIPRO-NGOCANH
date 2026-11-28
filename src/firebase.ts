@@ -103,15 +103,163 @@ export async function signOutUser() {
   return firebaseSignOut(auth);
 }
 
-export async function getAuthBearerHeaders(): Promise<Record<string, string>> {
+export class AuthSessionError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'AuthSessionError';
+    this.code = code;
+  }
+}
+
+export async function getAuthBearerHeaders(forceRefresh = false): Promise<Record<string, string>> {
   const currentUser = auth.currentUser;
   if (!currentUser) {
-    throw new Error('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+    throw new AuthSessionError(
+      'SESSION_EXPIRED',
+      'Phiên đăng nhập Google/Firebase đã hết hạn. Vui lòng đăng nhập lại.'
+    );
   }
-  const idToken = await currentUser.getIdToken();
+  try {
+    const idToken = await currentUser.getIdToken(forceRefresh);
+    if (!idToken) {
+      throw new AuthSessionError(
+        'SESSION_EXPIRED',
+        'Không thể lấy mã xác thực phiên đăng nhập (Firebase ID Token). Vui lòng đăng nhập lại.'
+      );
+    }
+    return {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      Authorization: `Bearer ${idToken}`,
+    };
+  } catch (err) {
+    if (err instanceof AuthSessionError) throw err;
+    throw new AuthSessionError(
+      'TOKEN_REFRESH_FAILED',
+      'Phiên đăng nhập Google/Firebase đã hết hạn hoặc không thể làm mới token. Vui lòng đăng xuất và đăng nhập lại.'
+    );
+  }
+}
+
+export interface AuthenticatedJsonResult<T> {
+  ok: boolean;
+  status: number;
+  data: T | null;
+  code: string;
+  error: string;
+}
+
+/**
+ * Gọi API backend có xác thực Firebase ID Token:
+ * - Tự động làm mới token 1 lần nếu máy chủ báo HTTP 401 (token vừa hết hạn).
+ * - Phân biệt rõ lỗi chưa triển khai backend API (HTTP 404/HTML trên static host), lỗi mạng/CORS,
+ *   lỗi hết phiên đăng nhập và mã lỗi JSON trả về từ máy chủ.
+ */
+export async function fetchAuthenticatedJson<T>(
+  url: string,
+  options: { method?: 'GET' | 'POST' | 'DELETE'; body?: unknown } = {}
+): Promise<AuthenticatedJsonResult<T>> {
+  const method = options.method || 'GET';
+  const serializedBody = options.body !== undefined ? JSON.stringify(options.body) : undefined;
+
+  const executeOnce = async (forceRefresh: boolean): Promise<Response> => {
+    const headers = await getAuthBearerHeaders(forceRefresh);
+    return fetch(url, {
+      method,
+      headers,
+      body: serializedBody,
+      cache: 'no-store',
+    });
+  };
+
+  let resp: Response;
+  try {
+    resp = await executeOnce(false);
+    if (resp.status === 401) {
+      // Thử làm mới Firebase ID Token 1 lần trước khi báo phiên hết hạn
+      resp = await executeOnce(true);
+    }
+  } catch (err) {
+    if (err instanceof AuthSessionError) {
+      return {
+        ok: false,
+        status: 401,
+        data: null,
+        code: err.code,
+        error: err.message,
+      };
+    }
+    return {
+      ok: false,
+      status: 0,
+      data: null,
+      code: 'NETWORK_ERROR',
+      error:
+        'Không thể kết nối tới máy chủ API (lỗi mạng hoặc CORS). Vui lòng kiểm tra kết nối Internet và thử lại.',
+    };
+  }
+
+  const contentType = (resp.headers.get('content-type') || '').toLowerCase();
+  const isJson = contentType.includes('application/json');
+
+  if (!isJson) {
+    if (resp.status === 404 || resp.status === 405 || resp.status === 200) {
+      return {
+        ok: false,
+        status: resp.status,
+        data: null,
+        code: 'API_BACKEND_NOT_DEPLOYED',
+        error: `Đường dẫn backend API (${url}) không phản hồi JSON (HTTP ${resp.status}). Bản triển khai hiện tại có thể chỉ đang chạy frontend tĩnh và chưa kích hoạt Vercel Serverless Functions (vercel.json, api/index.ts).`,
+      };
+    }
+    return {
+      ok: false,
+      status: resp.status,
+      data: null,
+      code: `SERVER_HTTP_${resp.status}`,
+      error: `Máy chủ backend phản hồi lỗi không phải JSON (HTTP ${resp.status}). Vui lòng kiểm tra log máy chủ trên Vercel.`,
+    };
+  }
+
+  let parsed: unknown = null;
+  try {
+    parsed = await resp.json();
+  } catch {
+    return {
+      ok: false,
+      status: resp.status,
+      data: null,
+      code: 'INVALID_JSON_RESPONSE',
+      error: `Phản hồi từ máy chủ không đúng định dạng JSON (HTTP ${resp.status}).`,
+    };
+  }
+
+  const record = (parsed && typeof parsed === 'object' ? parsed : {}) as Record<string, unknown>;
+  const serverCode = typeof record.code === 'string' && record.code.trim() ? record.code.trim() : '';
+  const serverError =
+    typeof record.error === 'string' && record.error.trim()
+      ? record.error.trim()
+      : typeof record.message === 'string' && record.message.trim()
+        ? record.message.trim()
+        : '';
+
+  if (!resp.ok) {
+    return {
+      ok: false,
+      status: resp.status,
+      data: parsed as T,
+      code: serverCode || `HTTP_${resp.status}`,
+      error: serverError || `Yêu cầu tới máy chủ thất bại (HTTP ${resp.status}).`,
+    };
+  }
+
   return {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${idToken}`,
+    ok: true,
+    status: resp.status,
+    data: parsed as T,
+    code: serverCode || 'OK',
+    error: '',
   };
 }
 

@@ -483,17 +483,23 @@ export const PedagogicalAssistantTab: React.FC<PedagogicalAssistantTabProps> = (
           extraInstruction: rcExtraInstruction,
         }),
       });
-      const data = (await resp.json()) as {
+      const rawBody = await resp.text();
+      let data: {
         text?: string;
         notesForTeacher?: string;
         error?: string;
         code?: string;
-      };
+      } = {};
+      try {
+        data = rawBody ? (JSON.parse(rawBody) as typeof data) : {};
+      } catch {
+        data = {};
+      }
       if (!resp.ok) {
         if (data.code === 'GEMINI_KEY_NOT_CONNECTED' || data.code === 'GEMINI_KEY_RECONNECT_REQUIRED') {
           onOpenGeminiKeySetup?.();
         }
-        throw new Error(data.error || `Không thể tạo nhận xét (HTTP ${resp.status}).`);
+        throw new Error(data.error || `Không thể tạo nhận xét (HTTP ${resp.status}). Vui lòng thử lại.`);
       }
 
       const aiText = (data.text || '').trim();
@@ -664,17 +670,23 @@ export const PedagogicalAssistantTab: React.FC<PedagogicalAssistantTabProps> = (
           extraInstruction: pmExtraInstruction,
         }),
       });
-      const data = (await resp.json()) as {
+      const rawBody = await resp.text();
+      let data: {
         text?: string;
         notesForTeacher?: string;
         error?: string;
         code?: string;
-      };
+      } = {};
+      try {
+        data = rawBody ? (JSON.parse(rawBody) as typeof data) : {};
+      } catch {
+        data = {};
+      }
       if (!resp.ok) {
         if (data.code === 'GEMINI_KEY_NOT_CONNECTED' || data.code === 'GEMINI_KEY_RECONNECT_REQUIRED') {
           onOpenGeminiKeySetup?.();
         }
-        throw new Error(data.error || `Không thể tạo bản nháp tin nhắn (HTTP ${resp.status}).`);
+        throw new Error(data.error || `Không thể tạo bản nháp tin nhắn (HTTP ${resp.status}). Vui lòng thử lại.`);
       }
 
       const aiText = (data.text || '').trim();
@@ -989,12 +1001,18 @@ export const PedagogicalAssistantTab: React.FC<PedagogicalAssistantTabProps> = (
         headers: { 'Content-Type': 'application/json', ...headers },
         body: JSON.stringify(payload),
       });
-      const data = (await resp.json()) as { text?: string; error?: string; code?: string };
+      const rawBody = await resp.text();
+      let data: { text?: string; error?: string; code?: string } = {};
+      try {
+        data = rawBody ? (JSON.parse(rawBody) as typeof data) : {};
+      } catch {
+        data = {};
+      }
       if (!resp.ok) {
         if (data.code === 'GEMINI_KEY_NOT_CONNECTED' || data.code === 'GEMINI_KEY_RECONNECT_REQUIRED') {
           onOpenGeminiKeySetup?.();
         }
-        throw new Error(data.error || `HTTP ${resp.status}`);
+        throw new Error(data.error || `Không thể chạy thử AI (HTTP ${resp.status}). Vui lòng thử lại.`);
       }
 
       setTestAiOutput((prev) => ({

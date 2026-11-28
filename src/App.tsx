@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { onAuthStateChanged, type User } from 'firebase/auth';
 import {
   collection,
@@ -166,6 +166,7 @@ import {
 import {
   GeminiKeySetupPanel,
   INITIAL_GEMINI_KEY_STATUS,
+  fetchTeacherGeminiKeyStatus,
   type TeacherGeminiKeyStatus,
 } from './components/GeminiKeySetupPanel';
 import {
@@ -781,6 +782,17 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  const reloadTeacherGeminiKeyStatus = useCallback(async (): Promise<TeacherGeminiKeyStatus | null> => {
+    if (!user || sessionKind !== 'teacher' || teacherAccessState !== 'approved' || !userRootReady) {
+      setGeminiKeyStatus(INITIAL_GEMINI_KEY_STATUS);
+      return null;
+    }
+    setGeminiKeyStatus((prev) => ({ ...prev, loading: true }));
+    const fresh = await fetchTeacherGeminiKeyStatus();
+    setGeminiKeyStatus(fresh);
+    return fresh;
+  }, [user, sessionKind, teacherAccessState, userRootReady]);
+
   // Bước 2: Kiểm tra trạng thái Gemini API key cá nhân (CHỈ dành cho Giáo viên đã duyệt, TUYỆT ĐỐI không chạy cho Cán bộ lớp)
   useEffect(() => {
     if (!user || sessionKind !== 'teacher' || teacherAccessState !== 'approved' || !userRootReady) {
@@ -792,54 +804,9 @@ export default function App() {
     setGeminiKeyStatus((prev) => ({ ...prev, loading: true }));
 
     (async () => {
-      try {
-        const headers = await getAuthBearerHeaders();
-        const resp = await fetch('/api/teacher/gemini-key/status', {
-          method: 'GET',
-          headers,
-        });
-        if (!resp.ok) {
-          throw new Error(`HTTP ${resp.status}`);
-        }
-        const data = (await resp.json()) as {
-          connected?: boolean;
-          status?: 'connected' | 'not_connected' | 'needs_reconnect';
-          maskedHint?: string;
-          lastVerifiedAtMs?: number | null;
-          updatedAtMs?: number | null;
-          usingDedicatedVaultSecret?: boolean;
-          encryptionKeyVersion?: 'v1-env' | 'v1-fallback' | null;
-          isProduction?: boolean;
-          message?: string;
-        };
-        if (cancelled) return;
-        setGeminiKeyStatus({
-          loading: false,
-          loaded: true,
-          connected: Boolean(data.connected),
-          status: data.status || (data.connected ? 'connected' : 'not_connected'),
-          maskedHint: data.maskedHint || '',
-          lastVerifiedAtMs: data.lastVerifiedAtMs ?? null,
-          updatedAtMs: data.updatedAtMs ?? null,
-          usingDedicatedVaultSecret: Boolean(data.usingDedicatedVaultSecret),
-          encryptionKeyVersion: data.encryptionKeyVersion ?? null,
-          isProduction: Boolean(data.isProduction),
-          message: data.message,
-        });
-      } catch {
-        if (cancelled) return;
-        setGeminiKeyStatus({
-          loading: false,
-          loaded: true,
-          connected: false,
-          status: 'not_connected',
-          maskedHint: '',
-          lastVerifiedAtMs: null,
-          updatedAtMs: null,
-          usingDedicatedVaultSecret: false,
-          message: 'Không thể tải trạng thái Gemini AI cá nhân. Bạn vẫn có thể quản lý lớp học bình thường.',
-        });
-      }
+      const fresh = await fetchTeacherGeminiKeyStatus();
+      if (cancelled) return;
+      setGeminiKeyStatus(fresh);
     })();
 
     return () => {
@@ -6737,6 +6704,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               setGeminiStep2DismissedUid(user.uid);
             }
           }}
+          onReloadStatus={reloadTeacherGeminiKeyStatus}
           onContinueWithoutAi={() => setGeminiStep2DismissedUid(user.uid)}
           onSignOut={() => void handleSignOut()}
           onToast={showToast}
@@ -7692,6 +7660,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
               classLabel={classConfig.className ? `Lớp ${classConfig.className}` : undefined}
               keyStatus={geminiKeyStatus}
               onStatusUpdated={setGeminiKeyStatus}
+              onReloadStatus={reloadTeacherGeminiKeyStatus}
               onToast={showToast}
             />
           )}
@@ -7824,6 +7793,7 @@ Ghi chú thêm của GVCN: ${commExtraContext || 'Không có'}.`;
           classLabel={classConfig.className ? `Lớp ${classConfig.className}` : undefined}
           keyStatus={geminiKeyStatus}
           onStatusUpdated={setGeminiKeyStatus}
+          onReloadStatus={reloadTeacherGeminiKeyStatus}
           onClose={() => setShowGeminiKeyModal(false)}
           onToast={showToast}
         />
